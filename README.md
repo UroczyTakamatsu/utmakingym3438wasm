@@ -1,26 +1,43 @@
-# YM3438 WASM minimum build
+# YM3438 VGM/VGZ renderer
 
-This is the first build-only stage for the YM3438 VGM player.
+This project extends the successfully building ymfm-sys + YM3438 WASM setup.
 
-It intentionally does **not** contain the browser player yet. Its only goal is to prove that:
+## What it does
 
-1. GitHub Actions fetches `h1romas4/ymfm-sys` with `--recurse-submodules`.
-2. The upstream `ymfm` source exists in `components/ymfm`.
-3. `ChipType::Ym3438` links successfully through the C++ shim.
-4. `wasm32-wasip1` can be produced.
-5. The resulting WASM generates samples through the real YM3438 core.
+- Builds ymfm-sys with its upstream ymfm submodule.
+- Uses YM3438.
+- Accepts VGM or VGZ input.
+- Parses YM2612-compatible VGM commands `0x52` and `0x53` and sends them to YM3438.
+- Handles waits `0x61`, `0x62`, `0x63`, and `0x70..0x7F`.
+- Handles VGM end and one loop pass.
+- Decompresses VGZ with gzip.
+- Produces a WASM executable and can produce a native WAV verification file.
 
-## How to use on Android
+## Important
 
-1. Create a new GitHub repository.
-2. Upload this project's files.
-3. Open **Actions**.
-4. Select **Build YM3438 WASM**.
-5. Run the workflow with **Run workflow**.
-6. When it finishes, open the run's **Artifacts** section and download `ym3438-wasm`.
+This is the **offline verification stage**. The WASM is currently a WASI executable, not yet the final browser C-ABI module.
 
-The next stage will replace the smoke-test program with a VGM/VGZ streaming API and browser audio output.
+The next stage will expose a browser-callable C ABI and connect it to JavaScript/AudioWorklet.
 
-## Why `--recurse-submodules` matters
+## GitHub Actions
 
-The `ymfm-sys` repository keeps the upstream ymfm implementation in its `components/ymfm` submodule. A plain ZIP of the repository can contain an empty submodule directory; the recursive clone fetches the actual source.
+The workflow intentionally starts from the previously successful setup:
+
+1. `actions/checkout@v5`
+2. recursive clone of `ymfm-sys`
+3. `std::abs` WASI compatibility patch
+4. WASI SDK 34
+5. `wasm32-wasip1` build
+
+The VGM renderer is then compiled on top of that.
+
+## VGM/VGZ test files
+
+For the next verification step, use:
+
+- `01 - Opening Theme.vgz` — short, no loop
+- `03 - Emerald Hill Zone.vgz` — long, looped
+
+The current workflow only attempts the first asset from a release URL. This is deliberate: do not depend on an unverified external asset location for the core build.
+
+The safest next step is to upload the test VGZ files directly to the repository and add them to a later verification job.
