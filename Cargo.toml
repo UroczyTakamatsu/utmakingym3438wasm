@@ -1,11 +1,12 @@
 [package]
-name = "ym3438-wasm-smoke"
+name = "ym3438-vgm-render"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 ymfm-sys = { path = "../ymfm-sys" }
+flate2 = "1.1"
 
 [[bin]]
-name = "ym3438-smoke"
+name = "ym3438-vgm-render"
 path = "src/main.rs"
