@@ -19,8 +19,13 @@ jobs:
       - name: Fetch ymfm-sys with upstream ymfm submodule
         run: |
           git clone --recurse-submodules --depth 1 https://github.com/h1romas4/ymfm-sys.git ../ymfm-sys
-          ls -la ../ymfm-sys/components/ymfm
-          find ../ymfm-sys/components/ymfm -maxdepth 2 -type f | head -50
+          test -f ../ymfm-sys/components/ymfm/ymfm.h
+          echo "ymfm submodule is present"
+
+      - name: Patch ymfm for WASI
+        run: |
+          sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
+          head -10 ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
 
       - name: Install WASI SDK 34
         run: |
