@@ -49,12 +49,15 @@ jobs:
 
       - name: Render Opening Theme
         run: |
-          curl -L --fail -o "01 - Opening Theme.vgz"             "https://github.com/utmaking/ym3438-test-assets/releases/download/v1/01%20-%20Opening%20Theme.vgz" || true
-          if [ -f "01 - Opening Theme.vgz" ]; then
-            ./target/release/ym3438-vgm-render "01 - Opening Theme.vgz" "opening-theme.wav"
-          else
-            echo "Opening Theme asset not available; WASM build still succeeded."
-          fi
+          ./target/release/ym3438-vgm-render \
+            "testdata/01 - Opening Theme.vgz" \
+            "opening-theme.wav"
+
+      - name: Render Emerald Hill Zone
+        run: |
+          ./target/release/ym3438-vgm-render \
+            "testdata/03 - Emerald Hill Zone.vgz" \
+            "emerald-hill-zone.wav"
 
       - name: Show WASM artifact
         run: |
