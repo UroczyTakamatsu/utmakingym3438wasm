@@ -21,6 +21,8 @@ jobs:
           git clone --recurse-submodules --depth 1 https://github.com/h1romas4/ymfm-sys.git ../ymfm-sys
           test -f ../ymfm-sys/components/ymfm/ymfm.h
           echo "ymfm submodule is present"
+          ls -la ../ymfm-sys/components/ymfm
+          find ../ymfm-sys/components/ymfm -maxdepth 2 -type f | head -50
 
       - name: Patch ymfm for WASI
         run: |
