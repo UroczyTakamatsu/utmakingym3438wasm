@@ -1,43 +1,60 @@
-# YM3438 VGM/VGZ renderer
+# YM3438 VGM/VGZ renderer — verification v2
 
-This project extends the successfully building ymfm-sys + YM3438 WASM setup.
+This version is a diagnostic/offline verification stage.
 
-## What it does
+## Test files included
 
-- Builds ymfm-sys with its upstream ymfm submodule.
-- Uses YM3438.
-- Accepts VGM or VGZ input.
-- Parses YM2612-compatible VGM commands `0x52` and `0x53` and sends them to YM3438.
-- Handles waits `0x61`, `0x62`, `0x63`, and `0x70..0x7F`.
-- Handles VGM end and one loop pass.
-- Decompresses VGZ with gzip.
-- Produces a WASM executable and can produce a native WAV verification file.
+- `testdata/01 - Opening Theme.vgz`
+- `testdata/03 - Emerald Hill Zone.vgz`
 
-## Important
+The files are included directly in the repository so the workflow does **not** download test assets from an external URL.
 
-This is the **offline verification stage**. The WASM is currently a WASI executable, not yet the final browser C-ABI module.
+## Important fixes from v1
 
-The next stage will expose a browser-callable C ABI and connect it to JavaScript/AudioWorklet.
+The first renderer stopped at the initial `0x67` data block because that command was not parsed correctly. These Mega Drive VGM files use a YM2612 DAC data block at the beginning.
 
-## GitHub Actions
+v2 adds:
 
-The workflow intentionally starts from the previously successful setup:
+- VGM `0x67` data-block parsing.
+- YM2612 DAC data bank type `0x00`.
+- VGM `0x80..0x8F` YM2612 DAC streaming commands.
+- VGM `0xE0` DAC data-bank seek.
+- Correct `0x80..0x8F` wait timing: low nibble is `0..15` samples.
+- Correct command-length handling for common VGM commands.
+- Detailed diagnostic counters.
+- Refusal to write a header-only 44-byte WAV.
+- Both supplied test VGZ files rendered by the same GitHub Actions job.
 
-1. `actions/checkout@v5`
-2. recursive clone of `ymfm-sys`
-3. `std::abs` WASI compatibility patch
-4. WASI SDK 34
-5. `wasm32-wasip1` build
+The `0x80..0x8F` interpretation is based on the VGM format behavior documented by VGMRips: these commands resolve to YM2612 register `0x2A` DAC writes plus a wait, while `0xE0` selects a position in the PCM data bank. citeturn0search0turn0search5
 
-The VGM renderer is then compiled on top of that.
+## Expected diagnostic result
 
-## VGM/VGZ test files
+For each track, Actions should print values such as:
 
-For the next verification step, use:
+- decompressed VGM size
+- VGM version
+- YM2612 clock
+- YM3438 native sample rate
+- data block count
+- DAC stream writes
+- YM2612/YM3438 register writes
+- VGM wait samples
+- generated PCM frames
+- peak sample
+- WAV file size
 
-- `01 - Opening Theme.vgz` — short, no loop
-- `03 - Emerald Hill Zone.vgz` — long, looped
+The most important values are:
 
-The current workflow only attempts the first asset from a release URL. This is deliberate: do not depend on an unverified external asset location for the core build.
+`Generated PCM frames`
 
-The safest next step is to upload the test VGZ files directly to the repository and add them to a later verification job.
+and
+
+`WAV written: ... (N bytes)`
+
+If `Generated PCM frames` is non-zero, the previous 44-byte WAV problem has been resolved.
+
+## WASM
+
+The WASM artifact is still a `wasm32-wasip1` executable. It is **not yet** the final browser-callable module.
+
+The next stage after successful WAV verification is to expose a browser-callable interface and then connect it to a Worker/AudioWorklet architecture.
