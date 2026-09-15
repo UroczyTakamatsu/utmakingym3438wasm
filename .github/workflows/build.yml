@@ -1,14 +1,24 @@
-name: Build YM3438 VGM renderer
+name: Build and diagnose YM3438 VGM renderer v2
 
 on:
   workflow_dispatch:
   push:
 
 jobs:
-  build:
+  build-and-render:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v5
+
+      - name: Verify test assets
+        run: |
+          set -eux
+          ls -lah testdata
+          test -f "testdata/01 - Opening Theme.vgz"
+          test -f "testdata/03 - Emerald Hill Zone.vgz"
+          file "testdata/01 - Opening Theme.vgz"
+          file "testdata/03 - Emerald Hill Zone.vgz"
 
       - name: Install Rust WASI target
         run: rustup target add wasm32-wasip1
@@ -17,9 +27,7 @@ jobs:
         run: |
           git clone --recurse-submodules --depth 1 https://github.com/h1romas4/ymfm-sys.git ../ymfm-sys
           echo "ymfm-sys cloned"
-          echo "Checking ymfm submodule..."
           git -C ../ymfm-sys submodule status
-          echo "Checking ymfm files..."
           find ../ymfm-sys/components/ymfm -maxdepth 2 -type f | head -50
 
       - name: Patch ymfm for WASI
@@ -28,7 +36,8 @@ jobs:
 
       - name: Install WASI SDK 34
         run: |
-          curl -L --fail --retry 3 -o wasi-sdk.tar.gz             https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
+          curl -L --fail --retry 3 -o wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
           tar -xzf wasi-sdk.tar.gz
           echo "WASI_SDK=$GITHUB_WORKSPACE/wasi-sdk-34.0-x86_64-linux" >> "$GITHUB_ENV"
 
@@ -41,11 +50,11 @@ jobs:
           echo "CARGO_TARGET_WASM32_WASIP1_LINKER=$WASI_SDK/bin/clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS=-C link-arg=--sysroot=$WASI_SDK/share/wasi-sysroot -C link-arg=-lc++ -C link-arg=-lc++abi" >> "$GITHUB_ENV"
 
-      - name: Build YM3438 VGM renderer
-        run: cargo build --release --target wasm32-wasip1
-
-      - name: Build native renderer for WAV verification
+      - name: Build native renderer for diagnostics
         run: cargo build --release
+
+      - name: Build YM3438 WASM
+        run: cargo build --release --target wasm32-wasip1
 
       - name: Render Opening Theme
         run: |
@@ -59,20 +68,37 @@ jobs:
             "testdata/03 - Emerald Hill Zone.vgz" \
             "emerald-hill-zone.wav"
 
+      - name: Inspect generated WAV files
+        run: |
+          ls -lh *.wav
+          file *.wav
+          python3 - <<'PY'
+          import os, struct, glob
+          for fn in glob.glob("*.wav"):
+              b = open(fn, "rb").read(64)
+              size = os.path.getsize(fn)
+              data_size = struct.unpack_from("<I", b, 40)[0] if len(b) >= 44 else -1
+              rate = struct.unpack_from("<I", b, 24)[0] if len(b) >= 28 else -1
+              channels = struct.unpack_from("<H", b, 22)[0] if len(b) >= 24 else -1
+              bits = struct.unpack_from("<H", b, 34)[0] if len(b) >= 36 else -1
+              print(f"{fn}: file={size} bytes, data={data_size} bytes, rate={rate}, channels={channels}, bits={bits}")
+          PY
+
       - name: Show WASM artifact
         run: |
           ls -lh target/wasm32-wasip1/release/ym3438-vgm-render.wasm
           file target/wasm32-wasip1/release/ym3438-vgm-render.wasm
 
+      - name: Upload WAV verification files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ym3438-vgm-wavs-v2
+          path: |
+            opening-theme.wav
+            emerald-hill-zone.wav
+
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ym3438-vgm-wasm
+          name: ym3438-vgm-wasm-v2
           path: target/wasm32-wasip1/release/ym3438-vgm-render.wasm
-
-      - name: Upload WAV verification if generated
-        uses: actions/upload-artifact@v4
-        if: hashFiles('opening-theme.wav') != ''
-        with:
-          name: ym3438-opening-theme-wav
-          path: opening-theme.wav
