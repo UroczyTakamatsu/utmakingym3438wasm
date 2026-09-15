@@ -1,1 +1,75 @@
+name: Build YM3438 VGM renderer
 
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust WASI target
+        run: rustup target add wasm32-wasip1
+
+      - name: Fetch ymfm-sys with upstream ymfm submodule
+        run: |
+          git clone --recurse-submodules --depth 1 https://github.com/h1romas4/ymfm-sys.git ../ymfm-sys
+          echo "ymfm-sys cloned"
+          echo "Checking ymfm submodule..."
+          git -C ../ymfm-sys submodule status
+          echo "Checking ymfm files..."
+          find ../ymfm-sys/components/ymfm -maxdepth 2 -type f | head -50
+
+      - name: Patch ymfm for WASI
+        run: |
+          sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
+
+      - name: Install WASI SDK 34
+        run: |
+          curl -L --fail --retry 3 -o wasi-sdk.tar.gz             https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
+          tar -xzf wasi-sdk.tar.gz
+          echo "WASI_SDK=$GITHUB_WORKSPACE/wasi-sdk-34.0-x86_64-linux" >> "$GITHUB_ENV"
+
+      - name: Configure WASI C++ toolchain
+        run: |
+          echo "CXX_wasm32_wasip1=$WASI_SDK/bin/clang++" >> "$GITHUB_ENV"
+          echo "CC_wasm32_wasip1=$WASI_SDK/bin/clang" >> "$GITHUB_ENV"
+          echo "CXXFLAGS_wasm32_wasip1=--target=wasm32-wasip1 --sysroot=$WASI_SDK/share/wasi-sysroot -fno-exceptions" >> "$GITHUB_ENV"
+          echo "CFLAGS_wasm32_wasip1=--target=wasm32-wasip1 --sysroot=$WASI_SDK/share/wasi-sysroot" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_WASM32_WASIP1_LINKER=$WASI_SDK/bin/clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS=-C link-arg=--sysroot=$WASI_SDK/share/wasi-sysroot -C link-arg=-lc++ -C link-arg=-lc++abi" >> "$GITHUB_ENV"
+
+      - name: Build YM3438 VGM renderer
+        run: cargo build --release --target wasm32-wasip1
+
+      - name: Build native renderer for WAV verification
+        run: cargo build --release
+
+      - name: Render Opening Theme
+        run: |
+          curl -L --fail -o "01 - Opening Theme.vgz"             "https://github.com/utmaking/ym3438-test-assets/releases/download/v1/01%20-%20Opening%20Theme.vgz" || true
+          if [ -f "01 - Opening Theme.vgz" ]; then
+            ./target/release/ym3438-vgm-render "01 - Opening Theme.vgz" "opening-theme.wav"
+          else
+            echo "Opening Theme asset not available; WASM build still succeeded."
+          fi
+
+      - name: Show WASM artifact
+        run: |
+          ls -lh target/wasm32-wasip1/release/ym3438-vgm-render.wasm
+          file target/wasm32-wasip1/release/ym3438-vgm-render.wasm
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ym3438-vgm-wasm
+          path: target/wasm32-wasip1/release/ym3438-vgm-render.wasm
+
+      - name: Upload WAV verification if generated
+        uses: actions/upload-artifact@v4
+        if: hashFiles('opening-theme.wav') != ''
+        with:
+          name: ym3438-opening-theme-wav
+          path: opening-theme.wav
