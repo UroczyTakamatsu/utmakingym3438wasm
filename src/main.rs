@@ -140,6 +140,7 @@ fn run() -> Result<(), String> {
     let mut blocks:HashMap<u8,Vec<u8>>=HashMap::new();
     let mut timeline_samples: u64 = 0;
     let mut loop_start_samples: Option<u64> = None;
+    let mut loop_end_samples: Option<u64> = None;
     let mut timing = TimingAccumulator::new();
     let mut out=Vec::<i16>::new(); let mut pos=data_off; let mut dac_pos=0usize; let mut waits=0u64; let mut writes=0u64; let mut dac_writes=0u64; let mut ym_writes=0u64; let mut data_blocks=0u64; let mut commands=0u64; let mut peak=0i32; let mut ended=false; let mut looped_once=false;
     while !ended {
@@ -165,8 +166,11 @@ fn run() -> Result<(), String> {
                 if loop_enabled {
                     if let Some(lp)=loop_pos {
                         if !looped_once && lp < eof {
-                            println!("vgm_end_reached=true; playing one loop pass from 0x{lp:X}");
-                            pos=lp; looped_once=true; continue;
+                            loop_end_samples = Some(timeline_samples);
+                            println!("vgm_end_reached=true; preparing seamless loop from 0x{lp:X}");
+                            pos=lp;
+                            looped_once=true;
+                            continue;
                         }
                     }
                 }
