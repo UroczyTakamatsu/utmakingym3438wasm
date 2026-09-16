@@ -1,27 +1,53 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YM3438 VGM → PCM Browser Test</title><style>body{font-family:sans-serif;max-width:800px;margin:28px auto;padding:0 16px}button{font-size:18px;padding:12px 18px}pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto}.ok{color:#080}.ng{color:#b00}audio{width:100%;margin-top:12px}</style></head>
-<body><h1>YM3438 VGM → PCM Browser Test</h1><p>実際の「Emerald Hill Zone.vgz」をWASM内で解析し、YM3438で曲の終端までPCM化し、VGMのループがあれば1回だけループしてから停止します。出力音量はテスト用に64倍へ調整します。WAVはstdoutではなくWASI共有ディレクトリへ直接生成します。</p><button id="run">Run Emerald Hill Zone → YM3438 → Full PCM</button><audio id="audio" controls></audio><pre id="log">準備中…</pre>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YM3438 VGM → AudioWorklet</title><style>body{font-family:sans-serif;max-width:800px;margin:28px auto;padding:0 16px}button{font-size:18px;padding:12px 18px;margin:4px}pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto}.ok{color:#080}.ng{color:#b00}</style></head>
+<body><h1>YM3438 VGM → AudioWorklet</h1><p>Emerald Hill ZoneをWASM内でYM3438再生し、生成したPCMをWASI共有ディレクトリから取得してAudioWorkletへチャンク転送します。音量ゲインは128倍です。</p><button id="run">生成してAudioWorklet再生</button><button id="stop" disabled>停止</button><pre id="log">準備中…</pre>
 <script type="module">
 import { init, runWasix, Directory } from "https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs";
-const logEl=document.querySelector('#log'), audio=document.querySelector('#audio');
+const logEl=document.querySelector('#log'); const runBtn=document.querySelector('#run'); const stopBtn=document.querySelector('#stop');
+let audioContext=null, node=null;
 function log(s){logEl.textContent += s+'\n';}
 async function main(){
   try{
-    logEl.textContent=''; audio.removeAttribute('src');
-    log('[1] Wasmer SDK初期化'); await init(); log('OK');
-    log('[2] WASM読み込み'); const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'}); if(!r.ok)throw new Error('WASM HTTP '+r.status); const bytes=new Uint8Array(await r.arrayBuffer()); log('OK: '+bytes.byteLength+' bytes');
-    log('[3] WASMコンパイル'); const module=await WebAssembly.compile(bytes); log('OK');
-    log('[4] VGM → YM3438 → PCM実行');
+    runBtn.disabled=true; stopBtn.disabled=false; logEl.textContent='';
+    log('[1] AudioContext / AudioWorklet準備');
+    audioContext = new AudioContext();
+    await audioContext.audioWorklet.addModule('./worklet.js');
+    node = new AudioWorkletNode(audioContext,'pcm-player',{outputChannelCount:[2]});
+    node.connect(audioContext.destination);
+    node.port.onmessage = e => { if(e.data?.type==='ended') log('[7] PCM再生終了'); };
+    await audioContext.resume(); log('OK: context='+audioContext.sampleRate+' Hz');
+
+    log('[2] Wasmer SDK初期化'); await init(); log('OK');
+    log('[3] WASM読み込み'); const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'}); if(!r.ok)throw new Error('WASM HTTP '+r.status); const bytes=new Uint8Array(await r.arrayBuffer()); log('OK: '+bytes.byteLength+' bytes');
+    log('[4] WASMコンパイル'); const module=await WebAssembly.compile(bytes); log('OK');
+    log('[5] VGM → YM3438 → PCM実行');
     const out = new Directory();
     const instance=await runWasix(module,{args:[],mount:{'/out':out}});
     const result=await instance.wait();
     const stdout=result.stdout ?? result.stdoutUtf8 ?? ''; log('exit code: '+result.code); log(stdout);
     if(result.code!==0)throw new Error('YM3438 VGM test exit code '+result.code);
-    log('[5] WASI共有ディレクトリからWAV取得');
-    const wavBytes=await out.readFile('/ym3438_output.wav');
-    const blob=new Blob([wavBytes],{type:'audio/wav'}); const url=URL.createObjectURL(blob); audio.src=url; audio.load();
-    log('[6] WAVをAudio要素へ設定: OK'); log('再生ボタンを押すと、生成PCMを聴けます。'); log('WAV size: '+blob.size+' bytes');
-  }catch(e){log('\nERROR: '+(e?.stack||e)); console.error(e);}
+
+    const rateMatch=stdout.match(/pcm_sample_rate=(\d+)/); const channelsMatch=stdout.match(/pcm_channels=(\d+)/);
+    const sourceRate=rateMatch?Number(rateMatch[1]):44100; const channels=channelsMatch?Number(channelsMatch[1]):2;
+    if(channels!==2)throw new Error('このAudioWorkletテストはステレオPCMのみ対応です');
+    log('[6] PCM取得 → AudioWorkletへチャンク転送');
+    const pcmBytes=await out.readFile('/ym3438_output.pcm');
+    node.port.postMessage({type:'init',sampleRate:sourceRate});
+    const CHUNK_BYTES=64*1024;
+    for(let off=0;off<pcmBytes.byteLength;off+=CHUNK_BYTES){
+      const end=Math.min(off+CHUNK_BYTES,pcmBytes.byteLength);
+      const chunk=pcmBytes.slice(off,end);
+      node.port.postMessage({type:'chunk',buffer:chunk.buffer},[chunk.buffer]);
+    }
+    node.port.postMessage({type:'end'});
+    log('PCM bytes: '+pcmBytes.byteLength+' / source rate: '+sourceRate+' Hz');
+    log('AudioWorkletへ転送完了。再生中です。');
+  }catch(e){log('\nERROR: '+(e?.stack||e)); console.error(e); stop();}
 }
-document.querySelector('#run').onclick=main;
+function stop(){
+  if(node){node.port.postMessage({type:'stop'}); node.disconnect(); node=null;}
+  if(audioContext){audioContext.close(); audioContext=null;}
+  runBtn.disabled=false; stopBtn.disabled=true; log('\n停止');
+}
+runBtn.onclick=main; stopBtn.onclick=stop;
 </script></body></html>
