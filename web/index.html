@@ -25,6 +25,7 @@ pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:1
 <input id="file" type="file" accept=".vgm,.vgz,audio/vgm,application/octet-stream">
 <div>
 <button id="play" disabled>選択した曲を再生</button>
+<button id="pause" disabled>一時停止</button>
 <button id="stop" disabled>停止</button>
 </div>
 <pre id="log">VGM/VGZファイルを選択してください。</pre>
@@ -34,7 +35,9 @@ const logEl=document.querySelector('#log');
 const drop=document.querySelector('#drop');
 const fileInput=document.querySelector('#file');
 const playBtn=document.querySelector('#play');
+const pauseBtn=document.querySelector('#pause');
 const stopBtn=document.querySelector('#stop');
+let paused=false;
 let selectedFile=null;
 let audioContext=null,node=null;
 let running=false;
@@ -66,7 +69,7 @@ async function main(){
     await audioContext.audioWorklet.addModule('./worklet.js');
     node=new AudioWorkletNode(audioContext,'pcm-player',{outputChannelCount:[2]});
     node.connect(audioContext.destination);
-    node.port.onmessage=e=>{if(e.data?.type==='ended'){log('[7] PCM再生終了'); stopBtn.disabled=true; playBtn.disabled=false; running=false;}};
+    node.port.onmessage=e=>{if(e.data?.type==='ended'){log('[10] PCM再生終了'); stopBtn.disabled=true; pauseBtn.disabled=true; playBtn.disabled=false; running=false; paused=false;}};
     await audioContext.resume(); log('OK: context='+audioContext.sampleRate+' Hz');
 
     log('[2] Wasmer SDK初期化'); await init(); log('OK');
@@ -104,15 +107,34 @@ async function main(){
     node.port.postMessage({type:'end'});
     log('PCM bytes: '+pcmBytes.byteLength+' / source rate: '+sourceRate+' Hz');
     log('AudioWorkletへ転送完了。再生中です。');
+    log('[7] PCM再生開始');
+    pauseBtn.disabled=false;
+    pauseBtn.textContent='一時停止';
+    paused=false;
   }catch(e){log('\nERROR: '+(e?.stack||e)); console.error(e); stop();}
+}
+function togglePause(){
+  if(!node||!running)return;
+  if(!paused){
+    node.port.postMessage({type:'pause'});
+    paused=true;
+    pauseBtn.textContent='再生';
+    log('[8] 一時停止');
+  }else{
+    node.port.postMessage({type:'resume'});
+    paused=false;
+    pauseBtn.textContent='一時停止';
+    log('[9] 再生再開');
+  }
 }
 function stop(){
   if(node){node.port.postMessage({type:'stop'}); node.disconnect(); node=null;}
   if(audioContext){audioContext.close(); audioContext=null;}
   runBtnState();
 }
-function runBtnState(){playBtn.disabled=!selectedFile; stopBtn.disabled=true; running=false;}
+function runBtnState(){playBtn.disabled=!selectedFile; pauseBtn.disabled=true; stopBtn.disabled=true; running=false; paused=false; pauseBtn.textContent='一時停止';}
 playBtn.onclick=main;
-stopBtn.onclick=()=>{log('\n停止'); stop();};
+pauseBtn.onclick=togglePause;
+stopBtn.onclick=()=>{log('\n[11] 停止'); stop();};
 </script>
 </body></html>

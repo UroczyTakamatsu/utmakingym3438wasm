@@ -8,6 +8,7 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
     this.sourceRate = sampleRate;
     this.ended = false;
     this.endNotified = false;
+    this.paused = false;
 
     this.port.onmessage = (event) => {
       const m = event.data;
@@ -19,10 +20,15 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         this.sourceRate = m.sampleRate || sampleRate;
         this.ended = false;
         this.endNotified = false;
+        this.paused = false;
       } else if (m.type === 'chunk') {
         this.queue.push(new Int16Array(m.buffer));
       } else if (m.type === 'end') {
         this.ended = true;
+      } else if (m.type === 'pause') {
+        this.paused = true;
+      } else if (m.type === 'resume') {
+        this.paused = false;
       } else if (m.type === 'stop') {
         this.queue.length = 0;
         this.current = null;
@@ -30,6 +36,7 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         this.sourcePos = 0;
         this.ended = false;
         this.endNotified = false;
+        this.paused = false;
       }
     };
   }
@@ -79,6 +86,10 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
 
   process(_inputs, outputs) {
     const output = outputs[0];
+    if (this.paused) {
+      for (const channel of output) channel.fill(0);
+      return true;
+    }
     const left = output[0];
     const right = output[1] || output[0];
     const ratio = this.sourceRate / sampleRate;
