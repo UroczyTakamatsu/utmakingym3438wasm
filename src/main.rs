@@ -7,20 +7,39 @@ fn main() {
     let channels = chip.channels();
     let rate = chip.sample_rate();
 
-    // Reset and program a simple YM3438 tone.
     chip.pin_mut().reset();
 
-    // Channel 0: algorithm 7, both operators audible.
+    // YM3438/OPN2 channel 0. Enable output to both left and right.
+    chip.pin_mut().write(0, 0xB4);
+    chip.pin_mut().write(1, 0xC0);
+
+    // Algorithm 7: all four operators feed the output.
     chip.pin_mut().write(0, 0xB0);
     chip.pin_mut().write(1, 0x07);
 
-    // Operator 1/2 total levels.
-    chip.pin_mut().write(0, 0x40);
-    chip.pin_mut().write(1, 0x00);
-    chip.pin_mut().write(0, 0x44);
-    chip.pin_mut().write(1, 0x00);
+    // Give all four operators an audible level, fast attack, and release.
+    // OPN2 operator register offsets for channel 0 are 0, 4, 8, 12.
+    for op in [0x00u8, 0x04, 0x08, 0x0C] {
+        chip.pin_mut().write(0, 0x40 + op);
+        chip.pin_mut().write(1, 0x00); // TL = 0 dB attenuation
 
-    // F-number.
+        chip.pin_mut().write(0, 0x50 + op);
+        chip.pin_mut().write(1, 0x1F); // AR = maximum
+
+        chip.pin_mut().write(0, 0x60 + op);
+        chip.pin_mut().write(1, 0x00); // DR = 0
+
+        chip.pin_mut().write(0, 0x70 + op);
+        chip.pin_mut().write(1, 0x00); // SR = 0
+
+        chip.pin_mut().write(0, 0x80 + op);
+        chip.pin_mut().write(1, 0x0F); // RR = maximum
+
+        chip.pin_mut().write(0, 0x30 + op);
+        chip.pin_mut().write(1, 0x01); // MUL = 1
+    }
+
+    // F-number/block for a clearly audible test tone.
     chip.pin_mut().write(0, 0xA0);
     chip.pin_mut().write(1, 0x98);
     chip.pin_mut().write(0, 0xA4);
@@ -30,7 +49,7 @@ fn main() {
     chip.pin_mut().write(0, 0x28);
     chip.pin_mut().write(1, 0xF0);
 
-    let frames = 2048usize;
+    let frames = 4096usize;
     let mut pcm = vec![0i32; frames * channels as usize];
     chip.pin_mut().generate(&mut pcm);
 
