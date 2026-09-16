@@ -31,6 +31,7 @@ pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:1
 <button id="play" disabled>選択した曲を再生</button>
 <button id="pause" disabled>一時停止</button>
 <button id="stop" disabled>停止</button>
+<button id="loop">ループ: ON</button>
 </div>
 <div id="seekRow">
   <span id="seekLabel">再生位置</span>
@@ -48,6 +49,7 @@ const pauseBtn=document.querySelector('#pause');
 const stopBtn=document.querySelector('#stop');
 const seekEl=document.querySelector('#seek');
 const timeEl=document.querySelector('#time');
+const loopBtn=document.querySelector('#loop');
 let paused=false;
 let selectedFile=null;
 let audioContext=null,node=null;
@@ -59,11 +61,18 @@ let wasmModule=null;
 let sourceRate=44100;
 let channels=2;
 let wasmerReady=false;
+let loopEnabled=true;
+let loopStartSeconds=null;
+let loopRestarting=false;
+let scrubbing=false;
 function log(s){logEl.textContent += s+'\n';}
 function fmtTime(sec){
   sec=Math.max(0,sec||0);
   const m=Math.floor(sec/60), s=Math.floor(sec%60);
   return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+function updateSeekVisibility(){
+  document.querySelector('#seekRow').style.display = loopEnabled ? 'none' : 'block';
 }
 function updateTime(sec){
   currentSeconds=Math.max(0,Math.min(duration,sec||0));
@@ -75,14 +84,11 @@ function newNode(){
   node.connect(audioContext.destination);
   node.port.onmessage=e=>{
     if(e.data?.type==='progress'){
-      if(!seeking) updateTime(e.data.seconds);
+      if(!seeking && !scrubbing) updateTime(e.data.seconds);
       return;
     }
     if(e.data?.type==='ended'){
-      log('[7] PCM再生終了');
-      stopBtn.disabled=true; pauseBtn.disabled=true; playBtn.disabled=false;
-      seekEl.disabled=false; running=false; paused=false;
-      updateTime(duration);
+      handlePlaybackEnded();
     }
   };
 }
@@ -152,15 +158,50 @@ async function main(){
     seekEl.disabled=false;
   }catch(e){log('\nERROR: '+(e?.stack||e)); console.error(e); stop();}
 }
+async function handlePlaybackEnded(){
+  if(loopRestarting)return;
+  if(loopEnabled && loopStartSeconds!==null && selectedFile && running){
+    loopRestarting=true;
+    try{
+      log('[7] ループ終端到達 → ループ開始位置から再生を継続');
+      if(node){node.port.postMessage({type:'stop'}); node.disconnect(); node=null;}
+      const result=await renderFromPosition(loopStartSeconds,'[LOOP]');
+      const stdout=result.stdout ?? result.stdoutUtf8 ?? '';
+      log('exit code: '+result.code); log(stdout);
+      if(result.code!==0)throw new Error('ループ用YM3438実行失敗: exit code '+result.code);
+      parseMetadata(stdout);
+      newNode();
+      await sendPcm(result.out,false,loopStartSeconds);
+      currentSeconds=loopStartSeconds;
+      updateTime(loopStartSeconds);
+      log('[LOOP] ループ開始位置から再生中');
+    }catch(e){
+      log('\n[LOOP-ERROR] '+(e?.stack||e));
+      running=false; paused=false;
+      if(node){node.disconnect();node=null;}
+      playBtn.disabled=!selectedFile; pauseBtn.disabled=true; stopBtn.disabled=true;
+    }finally{
+      loopRestarting=false;
+    }
+    return;
+  }
+  log('[7] PCM再生終了');
+  stopBtn.disabled=true; pauseBtn.disabled=true; playBtn.disabled=false;
+  seekEl.disabled=!loopEnabled; running=false; paused=false;
+  updateTime(duration);
+}
+
 function parseMetadata(stdout){
   const rateMatch=stdout.match(/pcm_sample_rate=(\d+)/);
   const channelsMatch=stdout.match(/pcm_channels=(\d+)/);
-  const durationMatch=stdout.match(/duration_seconds=([0-9.]+)/);
+  const durationMatch=stdout.match(/total_duration_seconds=([0-9.]+)/) || stdout.match(/timeline_duration_seconds=([0-9.]+)/) || stdout.match(/duration_seconds=([0-9.]+)/);
+  const loopMatch=stdout.match(/loop_start_seconds=([0-9.]+)/);
   sourceRate=rateMatch?Number(rateMatch[1]):44100;
   channels=channelsMatch?Number(channelsMatch[1]):2;
   duration=durationMatch?Number(durationMatch[1]):0;
+  loopStartSeconds=loopMatch?Number(loopMatch[1]):null;
   if(channels!==2)throw new Error('このAudioWorkletテストはステレオPCMのみ対応です');
-  seekEl.max=String(duration); seekEl.step='0.01'; updateTime(currentSeconds);
+  seekEl.max=String(duration); seekEl.step='0.01'; updateTime(currentSeconds); updateSeekVisibility();
 }
 async function renderFromPosition(seconds, label){
   if(!wasmerReady||!wasmModule)throw new Error('Wasmer/WASMが未初期化です');
@@ -169,12 +210,13 @@ async function renderFromPosition(seconds, label){
   await input.writeFile('/input.vgm',inputBytes);
   const seekMs=Math.max(0,Math.round(seconds*1000));
   log(label+' VGM再構築開始: '+(seekMs/1000).toFixed(2)+'s');
-  const instance=await runWasix(wasmModule,{args:[`--seek-ms=${seekMs}`],mount:{'/in':input,'/out':out}});
+  const instance=await runWasix(wasmModule,{args:[`--seek-ms=${seekMs}`, '--loop=0'],mount:{'/in':input,'/out':out}});
   const result=await instance.wait();
   result.out=out;
   return result;
 }
 async function doSeek(seconds){
+  if(loopEnabled)return;
   if(!selectedFile||!wasmModule||!audioContext||seeking)return;
   const target=Math.max(0,Math.min(duration,Number(seconds)||0));
   seeking=true;
@@ -205,13 +247,28 @@ async function doSeek(seconds){
     log('\n[S-ERROR] '+(e?.stack||e));
   }finally{
     seeking=false;
+    scrubbing=false;
     if(running){
       playBtn.disabled=true; stopBtn.disabled=false; pauseBtn.disabled=!node; seekEl.disabled=false;
+      updateSeekVisibility();
     }else{
       runBtnState();
     }
   }
 }
+function toggleLoop(){
+  loopEnabled=!loopEnabled;
+  loopBtn.textContent=loopEnabled?'ループ: ON':'ループ: OFF';
+  updateSeekVisibility();
+  log('[LOOP] '+(loopEnabled?'オン':'オフ'));
+  if(loopEnabled){
+    // Looping has no finite completion time, so the seek UI is hidden.
+    seekEl.disabled=true;
+  }else if(duration>0){
+    seekEl.disabled=!running;
+  }
+}
+
 function togglePause(){
   if(!node||!running||seeking)return;
   if(!paused){
@@ -231,10 +288,15 @@ function stop(){
   if(audioContext){audioContext.close(); audioContext=null;}
   runBtnState();
 }
-function runBtnState(){playBtn.disabled=!selectedFile; pauseBtn.disabled=true; stopBtn.disabled=true; running=false; paused=false; seeking=false; pauseBtn.textContent='一時停止'; seekEl.disabled=!duration;}
+function runBtnState(){playBtn.disabled=!selectedFile; pauseBtn.disabled=true; stopBtn.disabled=true; running=false; paused=false; seeking=false; pauseBtn.textContent='一時停止'; seekEl.disabled=loopEnabled||!duration; updateSeekVisibility();}
 playBtn.onclick=main;
 pauseBtn.onclick=togglePause;
+loopBtn.onclick=toggleLoop;
+updateSeekVisibility();
 stopBtn.onclick=()=>{log('\n[11] 停止'); stop();};
+seekEl.addEventListener('pointerdown',()=>{ if(!loopEnabled && running) scrubbing=true; });
+seekEl.addEventListener('touchstart',()=>{ if(!loopEnabled && running) scrubbing=true; },{passive:true});
 seekEl.addEventListener('change',()=>doSeek(Number(seekEl.value)));
+seekEl.addEventListener('pointercancel',()=>{ scrubbing=false; });
 </script>
 </body></html>
