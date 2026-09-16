@@ -1,25 +1,13 @@
-name: Build and deploy YM3438 browser test
+name: Build YM3438 browser execution test
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -33,9 +21,11 @@ jobs:
         run: |
           git clone --recurse-submodules --depth 1 https://github.com/h1romas4/ymfm-sys.git ../ymfm-sys
           git -C ../ymfm-sys submodule status
+          find ../ymfm-sys/components/ymfm -maxdepth 2 -type f | head -50
 
       - name: Patch ymfm for WASI
-        run: sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
+        run: |
+          sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
 
       - name: Install WASI SDK
         run: |
@@ -47,10 +37,12 @@ jobs:
           tar -xzf "$ARCHIVE"
           test -x "$DIR/bin/clang++"
           echo "WASI_SDK_PATH=$PWD/$DIR" >> "$GITHUB_ENV"
-          echo "$PWD/$DIR/bin" >> "$GITHUB_PATH"
+          echo "Found WASI SDK: $PWD/$DIR"
+          "$DIR/bin/clang++" --version
 
       - name: Configure WASI toolchain
         run: |
+          echo "$WASI_SDK_PATH/bin" >> "$GITHUB_PATH"
           echo "CXX_wasm32_wasip1=$WASI_SDK_PATH/bin/clang++" >> "$GITHUB_ENV"
           echo "CXXFLAGS_wasm32_wasip1=--target=wasm32-wasip1 --sysroot=$WASI_SDK_PATH/share/wasi-sysroot -fno-exceptions" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_WASM32_WASIP1_LINKER=$WASI_SDK_PATH/bin/clang" >> "$GITHUB_ENV"
@@ -59,43 +51,22 @@ jobs:
       - name: Build browser test executable
         run: |
           cargo build --release --target wasm32-wasip1
-          test -s target/wasm32-wasip1/release/ym3438-browser-test.wasm
+          find target/wasm32-wasip1/release -maxdepth 1 -type f -name '*.wasm' -ls
 
-      - name: Prepare Pages site
+      - name: Copy browser WASM
         run: |
-          rm -rf dist
+          cp target/wasm32-wasip1/release/ym3438-browser-test.wasm web/ym3438_browser_test.wasm
+          ls -lh web/ym3438_browser_test.wasm web/worklet.js
+
+      - name: Package site
+        run: |
           mkdir dist
-          cp web/index.html dist/
-          cp web/coi-serviceworker.js dist/
-          cp target/wasm32-wasip1/release/ym3438-browser-test.wasm dist/ym3438_browser_test.wasm
-          cp README.md dist/
-          touch dist/.nojekyll
-          ls -lh dist
+          cp web/index.html web/worklet.js web/ym3438_browser_test.wasm README.md dist/
+          cd dist
+          zip -r ../ym3438-browser-test.zip .
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: ./dist
-
-      - name: Upload diagnostic ZIP
+      - name: Upload browser test
         uses: actions/upload-artifact@v4
         with:
           name: ym3438-browser-test
-          path: dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Configure GitHub Pages
-        id: pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          path: ym3438-browser-test.zip
