@@ -1,6 +1,7 @@
 use flate2::read::GzDecoder;
 use std::io::Read;
 use std::fs;
+use std::env;
 use ymfm_sys::ffi;
 use std::collections::HashMap;
 
@@ -81,18 +82,18 @@ fn render_wait(
     wait: u64,
     timing: &mut TimingAccumulator,
     peak: &mut i32,
+    skip_frames: &mut u64,
 ) -> u64 {
     if wait == 0 { return 0; }
-
-    // Convert the VGM 44100-Hz timeline to native YM3438 frames while carrying
-    // the fractional remainder across commands. Do not round each command.
     let n = timing.frames_for_wait(wait, native_rate);
     if n == 0 { return 0; }
-
     let mut buf = vec![0i32; n * channels];
     chip.pin_mut().generate(&mut buf);
-    for x in buf {
-        *peak = (*peak).max(x.abs());
+    for x in &buf { *peak = (*peak).max(x.abs()); }
+
+    let skip = (*skip_frames).min(n as u64) as usize;
+    *skip_frames -= skip as u64;
+    for &x in &buf[skip * channels..] {
         let y = ((x >> 8) * OUTPUT_GAIN).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         out.push(y);
     }
@@ -104,7 +105,9 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    let seek_ms: u64 = env::args().skip(1).find_map(|a| a.strip_prefix("--seek-ms=").and_then(|v| v.parse().ok())).unwrap_or(0);
     println!("YM3438 browser VGM/VGZ -> PCM diagnostic test");
+    println!("seek_ms={seek_ms}");
     let input_meta = fs::metadata("/in/input.vgm").map_err(|e| format!("input file metadata failed: {e}"))?;
     println!("input_bytes={}", input_meta.len());
     let bytes=load_vgm_input()?;
@@ -124,6 +127,9 @@ fn run() -> Result<(), String> {
     chip.pin_mut().reset();
     let channels=chip.channels() as usize; let rate=chip.sample_rate() as u32;
     println!("ym3438_channels={channels}"); println!("ym3438_native_rate={rate}");
+    let target_frames = ((seek_ms as u128 * rate as u128 * 44100u128) / (1000u128 * 44100u128)) as u64;
+    let mut skip_frames = target_frames;
+    println!("seek_target_native_frames={target_frames}");
     let loop_rel=u32le(&bytes,0x1c);
     let loop_pos=if loop_rel==0 {None} else {Some(0x1c + loop_rel as usize)};
     let loop_samples=u32le(&bytes,0x20);
@@ -143,12 +149,12 @@ fn run() -> Result<(), String> {
         match cmd {
             0x50 => pos+=2,
             0x52|0x53 => { if pos+3>eof {return Err("truncated YM write".into());} let reg=bytes[pos+1]; let val=bytes[pos+2]; let port=if cmd==0x52 {0} else {2}; chip.pin_mut().write(port,reg); chip.pin_mut().write(port+1,val); writes+=1; ym_writes+=1; pos+=3; }
-            0x61 => {let n=u16::from_le_bytes([bytes[pos+1],bytes[pos+2]]) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak); waits+=n; pos+=3;}
-            0x62 => {render_wait(&mut chip,&mut out,channels,rate,735,&mut timing,&mut peak); waits+=735; pos+=1;}
-            0x63 => {render_wait(&mut chip,&mut out,channels,rate,882,&mut timing,&mut peak); waits+=882; pos+=1;}
+            0x61 => {let n=u16::from_le_bytes([bytes[pos+1],bytes[pos+2]]) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak,&mut skip_frames); waits+=n; pos+=3;}
+            0x62 => {render_wait(&mut chip,&mut out,channels,rate,735,&mut timing,&mut peak,&mut skip_frames); waits+=735; pos+=1;}
+            0x63 => {render_wait(&mut chip,&mut out,channels,rate,882,&mut timing,&mut peak,&mut skip_frames); waits+=882; pos+=1;}
             0x67 => {let len=command_size(&bytes,pos,eof).ok_or("invalid 0x67 data block")?; let ty=bytes[pos+2]; let n=u32le(&bytes,pos+3) as usize; let st=pos+7; blocks.insert(ty,bytes[st..st+n].to_vec()); data_blocks+=1; if ty==0 {dac_pos=0;} pos+=len;}
-            0x70..=0x7f => {let n=(cmd&0x0f) as u64+1; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak); waits+=n; pos+=1;}
-            0x80..=0x8f => {let bank=blocks.get(&0).ok_or("DAC bank missing")?; if dac_pos>=bank.len() {return Err("DAC bank exhausted".into());} let v=bank[dac_pos]; dac_pos+=1; chip.pin_mut().write(0,0x2a); chip.pin_mut().write(1,v); writes+=1; dac_writes+=1; let n=(cmd&0x0f) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak); waits+=n; pos+=1;}
+            0x70..=0x7f => {let n=(cmd&0x0f) as u64+1; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak,&mut skip_frames); waits+=n; pos+=1;}
+            0x80..=0x8f => {let bank=blocks.get(&0).ok_or("DAC bank missing")?; if dac_pos>=bank.len() {return Err("DAC bank exhausted".into());} let v=bank[dac_pos]; dac_pos+=1; chip.pin_mut().write(0,0x2a); chip.pin_mut().write(1,v); writes+=1; dac_writes+=1; let n=(cmd&0x0f) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak,&mut skip_frames); waits+=n; pos+=1;}
             0xe0 => {let off=u32le(&bytes,pos+1) as usize; let bank=blocks.get(&0).ok_or("DAC bank missing")?; if off>=bank.len() {return Err("DAC seek out of range".into());} dac_pos=off; pos+=5;}
             0x66 => {
                 if let Some(lp)=loop_pos {
@@ -163,7 +169,9 @@ fn run() -> Result<(), String> {
         }
     }
     let frames=out.len()/channels;
-    println!("commands={commands}"); println!("register_writes={writes}"); println!("ym_register_writes={ym_writes}"); println!("dac_writes={dac_writes}"); println!("data_blocks={data_blocks}"); println!("wait_samples={waits}"); println!("duration_seconds={:.3}", waits as f64 / VGM_RATE as f64); println!("generated_frames={frames}"); println!("peak_raw={peak}"); println!("output_gain={OUTPUT_GAIN}"); println!("looped_once={looped_once}"); println!("timing_remainder_1_44100={}", timing.remainder);
+    println!("commands={commands}"); println!("register_writes={writes}"); println!("ym_register_writes={ym_writes}"); println!("dac_writes={dac_writes}"); println!("data_blocks={data_blocks}"); println!("wait_samples={waits}"); println!("duration_seconds={:.3}", waits as f64 / VGM_RATE as f64); println!("generated_frames={frames}");
+    println!("skipped_native_frames={}", target_frames.saturating_sub(skip_frames));
+    println!("seek_effective_seconds={:.6}", target_frames as f64 / rate as f64); println!("peak_raw={peak}"); println!("output_gain={OUTPUT_GAIN}"); println!("looped_once={looped_once}"); println!("timing_remainder_1_44100={}", timing.remainder);
     let preview: Vec<String> = out.iter().take(32).map(|v| v.to_string()).collect();
     println!("pcm_preview={}", preview.join(","));
     if frames==0 || peak==0 {return Err("VGM parsing completed but PCM is silent".into());}
