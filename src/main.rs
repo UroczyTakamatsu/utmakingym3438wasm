@@ -137,8 +137,6 @@ fn run() -> Result<(), String> {
     let loop_samples=u32le(&bytes,0x20);
     println!("vgm_loop_position={loop_pos:?}");
     println!("vgm_loop_samples={loop_samples}");
-    println!("vgm_total_samples={total_samples}");
-    println!("total_duration_seconds={:.6}", total_samples as f64 / VGM_RATE as f64);
     let mut blocks:HashMap<u8,Vec<u8>>=HashMap::new();
     let mut timeline_samples: u64 = 0;
     let mut loop_start_samples: Option<u64> = None;
