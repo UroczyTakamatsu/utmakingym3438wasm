@@ -1,8 +1,13 @@
-name: Build YM3438 browser execution test
+name: Build and deploy YM3438 browser player
 
 on:
   workflow_dispatch:
   push:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -60,13 +65,33 @@ jobs:
 
       - name: Package site
         run: |
+          rm -rf dist
           mkdir dist
-          cp web/index.html web/worklet.js web/ym3438_browser_test.wasm README.md dist/
+          cp web/index.html web/worklet.js web/coi-serviceworker.js web/ym3438_browser_test.wasm README.md dist/
+          touch dist/.nojekyll
+          echo "=== GitHub Pages dist ==="
+          ls -lh dist
           cd dist
           zip -r ../ym3438-browser-test.zip .
 
-      - name: Upload browser test
+      - name: Upload browser test artifact
         uses: actions/upload-artifact@v4
         with:
           name: ym3438-browser-test
           path: ym3438-browser-test.zip
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
