@@ -1,138 +1,156 @@
 class PcmPlayerProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.queue = [];
-    this.current = null;
-    this.offset = 0;       // interleaved-sample offset in current
-    this.sourcePos = 0;    // source-frame position relative to current offset
+    this.chunks = [];
+    this.totalFrames = 0;
+    this.ready = false;
+    this.sourcePos = 0;
     this.sourceRate = sampleRate;
     this.ended = false;
     this.endNotified = false;
     this.paused = false;
-    this.totalSourceFrames = 0;
+    this.loopEnabled = false;
+    this.loopStartFrame = 0;
+    this.loopEndFrame = 0;
+    this.playEndFrame = 0;
     this.reportCounter = 0;
 
     this.port.onmessage = (event) => {
       const m = event.data;
       if (m.type === 'init') {
-        this.queue.length = 0;
-        this.current = null;
-        this.offset = 0;
-        this.sourcePos = 0;
+        this.chunks = [];
+        this.totalFrames = 0;
+        this.ready = false;
         this.sourceRate = m.sampleRate || sampleRate;
+        this.sourcePos = 0;
         this.ended = false;
         this.endNotified = false;
         this.paused = false;
-        this.totalSourceFrames = (Number(m.startSeconds) || 0) * this.sourceRate;
+        this.loopEnabled = !!m.loopEnabled;
+        const start = Number(m.startSeconds) || 0;
+        const ls = Number(m.loopStartSeconds);
+        const le = Number(m.loopEndSeconds);
+        this.loopStartFrame = Number.isFinite(ls) ? ls * this.sourceRate : 0;
+        this.loopEndFrame = Number.isFinite(le) ? le * this.sourceRate : 0;
+        this.playEndFrame = this.loopEndFrame > this.loopStartFrame ? this.loopEndFrame : Infinity;
+        this.sourcePos = start * this.sourceRate;
         this.reportCounter = 0;
       } else if (m.type === 'chunk') {
-        this.queue.push(new Int16Array(m.buffer));
+        const data = new Int16Array(m.buffer);
+        this.chunks.push({ data, startFrame: this.totalFrames });
+        this.totalFrames += Math.floor(data.length / 2);
       } else if (m.type === 'end') {
         this.ended = true;
+        this.ready = true;
       } else if (m.type === 'pause') {
         this.paused = true;
       } else if (m.type === 'resume') {
         this.paused = false;
+      } else if (m.type === 'setLoop') {
+        this.loopEnabled = !!m.enabled;
       } else if (m.type === 'stop') {
-        this.queue.length = 0;
-        this.current = null;
-        this.offset = 0;
+        this.chunks = [];
+        this.totalFrames = 0;
+        this.ready = false;
         this.sourcePos = 0;
         this.ended = false;
         this.endNotified = false;
         this.paused = false;
-        this.totalSourceFrames = 0;
+        this.loopEnabled = false;
+        this.loopStartFrame = 0;
+        this.loopEndFrame = 0;
+        this.playEndFrame = 0;
         this.reportCounter = 0;
       }
     };
   }
 
-  // Return one stereo frame at a frame index relative to the current read offset.
   getFrame(frameIndex) {
-    let sampleIndex = frameIndex * 2;
-
-    if (this.current !== null) {
-      const available = this.current.length - this.offset;
-      if (sampleIndex + 1 < available) {
-        const p = this.offset + sampleIndex;
-        return [this.current[p], this.current[p + 1]];
+    if (frameIndex < 0 || frameIndex >= this.totalFrames) return null;
+    // PCM chunks are ordered and normally accessed sequentially. The chunk
+    // count is small enough that a backwards/forward scan is inexpensive.
+    for (const chunk of this.chunks) {
+      if (frameIndex >= chunk.startFrame) {
+        const local = frameIndex - chunk.startFrame;
+        const p = local * 2;
+        if (p + 1 < chunk.data.length) {
+          return [chunk.data[p], chunk.data[p + 1]];
+        }
+      } else {
+        break;
       }
-      sampleIndex -= available;
-    }
-
-    for (const q of this.queue) {
-      if (sampleIndex + 1 < q.length) {
-        return [q[sampleIndex], q[sampleIndex + 1]];
-      }
-      sampleIndex -= q.length;
     }
     return null;
   }
 
-  discardFrames(frames) {
-    let samples = frames * 2;
-    while (samples > 0) {
-      if (this.current === null) {
-        if (this.queue.length === 0) return;
-        this.current = this.queue.shift();
-        this.offset = 0;
-      }
-
-      const available = this.current.length - this.offset;
-      const take = Math.min(samples, available);
-      this.offset += take;
-      samples -= take;
-
-      if (this.offset >= this.current.length) {
-        this.current = null;
-        this.offset = 0;
-      }
-    }
-  }
-
   process(_inputs, outputs) {
     const output = outputs[0];
-    if (this.paused) {
-      for (const channel of output) channel.fill(0);
-      return true;
-    }
     const left = output[0];
     const right = output[1] || output[0];
+
+    if (this.paused || !this.ready) {
+      left.fill(0);
+      if (output[1]) right.fill(0);
+      return true;
+    }
+
     const ratio = this.sourceRate / sampleRate;
 
     for (let i = 0; i < left.length; i++) {
+      // With looping enabled, wrap before fetching the interpolation pair.
+      if (this.loopEnabled && this.loopEndFrame > this.loopStartFrame &&
+          this.sourcePos >= this.loopEndFrame) {
+        const len = this.loopEndFrame - this.loopStartFrame;
+        this.sourcePos = this.loopStartFrame +
+          ((this.sourcePos - this.loopEndFrame) % len);
+        this.endNotified = false;
+        this.port.postMessage({ type: 'loop' });
+      }
+
+      // When looping is disabled, stop exactly at the VGM loop end if one
+      // exists; otherwise stop at the end of the PCM.
+      if (!this.loopEnabled && this.loopEndFrame > this.loopStartFrame &&
+          this.sourcePos >= this.loopEndFrame) {
+        if (!this.endNotified) {
+          this.endNotified = true;
+          this.port.postMessage({ type: 'ended' });
+        }
+        left[i] = 0;
+        right[i] = 0;
+        continue;
+      }
+
+      if (this.sourcePos >= this.totalFrames - 1) {
+        if (!this.endNotified) {
+          this.endNotified = true;
+          this.port.postMessage({ type: 'ended' });
+        }
+        left[i] = 0;
+        right[i] = 0;
+        continue;
+      }
+
       const base = Math.floor(this.sourcePos);
       const frac = this.sourcePos - base;
       const a = this.getFrame(base);
       const b = this.getFrame(base + 1);
-
-      if (a === null || b === null) {
+      if (!a || !b) {
         left[i] = 0;
         right[i] = 0;
-
-        if (this.ended && !this.endNotified) {
-          this.endNotified = true;
-          this.port.postMessage({ type: 'ended' });
-        }
         continue;
       }
 
       left[i] = (a[0] + (b[0] - a[0]) * frac) / 32768;
       right[i] = (a[1] + (b[1] - a[1]) * frac) / 32768;
-
       this.sourcePos += ratio;
-      this.totalSourceFrames += ratio;
-      this.reportCounter += 1;
+      this.reportCounter++;
+
       if (this.reportCounter >= 12) {
         this.reportCounter = 0;
-        this.port.postMessage({ type: 'progress', seconds: this.totalSourceFrames / this.sourceRate });
-      }
-
-      // Remove only the whole source frames that are now behind the cursor.
-      const discard = Math.floor(this.sourcePos);
-      if (discard > 0) {
-        this.discardFrames(discard);
-        this.sourcePos -= discard;
+        this.port.postMessage({
+          type: 'progress',
+          seconds: this.sourcePos / this.sourceRate
+        });
       }
     }
 
