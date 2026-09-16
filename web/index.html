@@ -1,35 +1,97 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YM3438 VGM → AudioWorklet</title><style>body{font-family:sans-serif;max-width:800px;margin:28px auto;padding:0 16px}button{font-size:18px;padding:12px 18px;margin:4px}pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto}.ok{color:#080}.ng{color:#b00}</style></head>
-<body><h1>YM3438 VGM → AudioWorklet</h1><p>Emerald Hill ZoneをWASM内でYM3438再生し、生成したPCMをWASI共有ディレクトリから取得してAudioWorkletへチャンク転送します。音量ゲインは128倍です。</p><button id="run">生成してAudioWorklet再生</button><button id="stop" disabled>停止</button><pre id="log">準備中…</pre>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YM3438 VGM/VGZ Player</title>
+<style>
+body{font-family:sans-serif;max-width:800px;margin:24px auto;padding:0 16px;background:#fafafa;color:#222}
+#drop{border:3px dashed #888;border-radius:16px;padding:42px 20px;text-align:center;background:white;cursor:pointer;transition:.15s}
+#drop.drag{border-color:#06c;background:#eef7ff}
+#drop strong{display:block;font-size:22px;margin-bottom:8px}
+#drop span{color:#666}
+button{font-size:17px;padding:10px 16px;margin:12px 4px 4px 0}
+#file{display:none}
+pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:100px}
+.ok{color:#080}.ng{color:#b00}
+</style>
+</head>
+<body>
+<h1>YM3438 VGM/VGZ Player</h1>
+<div id="drop" tabindex="0" role="button" aria-label="VGMまたはVGZファイルを選択">
+  <strong>VGM / VGZ をここへドロップ</strong>
+  <span>タップしてファイルを選択することもできます</span>
+</div>
+<input id="file" type="file" accept=".vgm,.vgz,audio/vgm,application/octet-stream">
+<div>
+<button id="play" disabled>選択した曲を再生</button>
+<button id="stop" disabled>停止</button>
+</div>
+<pre id="log">VGM/VGZファイルを選択してください。</pre>
 <script type="module">
 import { init, runWasix, Directory } from "https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs";
-const logEl=document.querySelector('#log'); const runBtn=document.querySelector('#run'); const stopBtn=document.querySelector('#stop');
-let audioContext=null, node=null;
+const logEl=document.querySelector('#log');
+const drop=document.querySelector('#drop');
+const fileInput=document.querySelector('#file');
+const playBtn=document.querySelector('#play');
+const stopBtn=document.querySelector('#stop');
+let selectedFile=null;
+let audioContext=null,node=null;
+let running=false;
 function log(s){logEl.textContent += s+'\n';}
+function setFile(file){
+  if(!file)return;
+  const name=file.name.toLowerCase();
+  if(!name.endsWith('.vgm')&&!name.endsWith('.vgz')){
+    logEl.textContent='ERROR: .vgm または .vgz ファイルを選択してください。';
+    selectedFile=null; playBtn.disabled=true; return;
+  }
+  selectedFile=file;
+  logEl.textContent='選択: '+file.name+' ('+file.size.toLocaleString()+' bytes)\n再生ボタンを押してください。';
+  playBtn.disabled=false;
+}
+drop.addEventListener('click',()=>fileInput.click());
+drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fileInput.click();}});
+fileInput.addEventListener('change',e=>setFile(e.target.files?.[0]));
+for(const ev of ['dragenter','dragover'])drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag');});
+for(const ev of ['dragleave','drop'])drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag');});
+drop.addEventListener('drop',e=>setFile(e.dataTransfer.files?.[0]));
 async function main(){
+  if(!selectedFile||running)return;
+  running=true; playBtn.disabled=true; stopBtn.disabled=false;
   try{
-    runBtn.disabled=true; stopBtn.disabled=false; logEl.textContent='';
+    logEl.textContent='';
     log('[1] AudioContext / AudioWorklet準備');
-    audioContext = new AudioContext();
+    audioContext=new AudioContext();
     await audioContext.audioWorklet.addModule('./worklet.js');
-    node = new AudioWorkletNode(audioContext,'pcm-player',{outputChannelCount:[2]});
+    node=new AudioWorkletNode(audioContext,'pcm-player',{outputChannelCount:[2]});
     node.connect(audioContext.destination);
-    node.port.onmessage = e => { if(e.data?.type==='ended') log('[7] PCM再生終了'); };
+    node.port.onmessage=e=>{if(e.data?.type==='ended'){log('[7] PCM再生終了'); stopBtn.disabled=true; playBtn.disabled=false; running=false;}};
     await audioContext.resume(); log('OK: context='+audioContext.sampleRate+' Hz');
 
     log('[2] Wasmer SDK初期化'); await init(); log('OK');
-    log('[3] WASM読み込み'); const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'}); if(!r.ok)throw new Error('WASM HTTP '+r.status); const bytes=new Uint8Array(await r.arrayBuffer()); log('OK: '+bytes.byteLength+' bytes');
+    log('[3] WASM読み込み');
+    const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'});
+    if(!r.ok)throw new Error('WASM HTTP '+r.status);
+    const bytes=new Uint8Array(await r.arrayBuffer()); log('OK: '+bytes.byteLength+' bytes');
     log('[4] WASMコンパイル'); const module=await WebAssembly.compile(bytes); log('OK');
-    log('[5] VGM → YM3438 → PCM実行');
-    const out = new Directory();
-    const instance=await runWasix(module,{args:[],mount:{'/out':out}});
-    const result=await instance.wait();
-    const stdout=result.stdout ?? result.stdoutUtf8 ?? ''; log('exit code: '+result.code); log(stdout);
-    if(result.code!==0)throw new Error('YM3438 VGM test exit code '+result.code);
 
-    const rateMatch=stdout.match(/pcm_sample_rate=(\d+)/); const channelsMatch=stdout.match(/pcm_channels=(\d+)/);
-    const sourceRate=rateMatch?Number(rateMatch[1]):44100; const channels=channelsMatch?Number(channelsMatch[1]):2;
+    log('[5] VGM/VGZ → YM3438 → PCM実行');
+    const input=new Directory(); const out=new Directory();
+    const inputBytes=new Uint8Array(await selectedFile.arrayBuffer());
+    await input.writeFile('/input.vgm',inputBytes);
+    const instance=await runWasix(module,{args:[],mount:{'/in':input,'/out':out}});
+    const result=await instance.wait();
+    const stdout=result.stdout ?? result.stdoutUtf8 ?? '';
+    log('exit code: '+result.code); log(stdout);
+    if(result.code!==0)throw new Error('YM3438 VGM/VGZ test exit code '+result.code);
+
+    const rateMatch=stdout.match(/pcm_sample_rate=(\d+)/);
+    const channelsMatch=stdout.match(/pcm_channels=(\d+)/);
+    const sourceRate=rateMatch?Number(rateMatch[1]):44100;
+    const channels=channelsMatch?Number(channelsMatch[1]):2;
     if(channels!==2)throw new Error('このAudioWorkletテストはステレオPCMのみ対応です');
+
     log('[6] PCM取得 → AudioWorkletへチャンク転送');
     const pcmBytes=await out.readFile('/ym3438_output.pcm');
     node.port.postMessage({type:'init',sampleRate:sourceRate});
@@ -47,7 +109,10 @@ async function main(){
 function stop(){
   if(node){node.port.postMessage({type:'stop'}); node.disconnect(); node=null;}
   if(audioContext){audioContext.close(); audioContext=null;}
-  runBtn.disabled=false; stopBtn.disabled=true; log('\n停止');
+  runBtnState();
 }
-runBtn.onclick=main; stopBtn.onclick=stop;
-</script></body></html>
+function runBtnState(){playBtn.disabled=!selectedFile; stopBtn.disabled=true; running=false;}
+playBtn.onclick=main;
+stopBtn.onclick=()=>{log('\n停止'); stop();};
+</script>
+</body></html>
