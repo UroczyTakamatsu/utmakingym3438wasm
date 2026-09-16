@@ -182,9 +182,11 @@ fn run() -> Result<(), String> {
     let frames=out.len()/channels;
     println!("commands={commands}"); println!("register_writes={writes}"); println!("ym_register_writes={ym_writes}"); println!("dac_writes={dac_writes}"); println!("data_blocks={data_blocks}"); println!("wait_samples={waits}"); let timeline_duration = waits as f64 / VGM_RATE as f64;
     let loop_start_seconds = loop_start_samples.map(|v| v as f64 / VGM_RATE as f64);
+    let loop_end_seconds = loop_end_samples.map(|v| v as f64 / VGM_RATE as f64);
     println!("duration_seconds={:.3}", timeline_duration);
     println!("timeline_duration_seconds={:.6}", timeline_duration);
     println!("loop_start_seconds={}", loop_start_seconds.map(|v| format!("{v:.6}")).unwrap_or_else(|| "none".into())); println!("generated_frames={frames}");
+    println!("loop_end_seconds={}", loop_end_seconds.map(|v| format!("{v:.6}")).unwrap_or_else(|| "none".into()));
     println!("skipped_native_frames={}", target_frames.saturating_sub(skip_frames));
     println!("seek_effective_seconds={:.6}", target_frames as f64 / rate as f64); println!("peak_raw={peak}"); println!("output_gain={OUTPUT_GAIN}"); println!("looped_once={looped_once}"); println!("timing_remainder_1_44100={}", timing.remainder);
     let preview: Vec<String> = out.iter().take(32).map(|v| v.to_string()).collect();
