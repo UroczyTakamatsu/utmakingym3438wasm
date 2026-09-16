@@ -55,11 +55,40 @@ fn command_size(bytes: &[u8], pos: usize, eof: usize) -> Option<usize> {
     if pos.checked_add(len)? <= eof { Some(len) } else { None }
 }
 
-fn render_wait(chip: &mut cxx::UniquePtr<ffi::Chip>, out: &mut Vec<i16>, channels: usize, native_rate: u32, wait: u64, peak: &mut i32) -> u64 {
+struct TimingAccumulator {
+    // Fractional native-rate frames are kept in units of 1/44100 frame.
+    // This prevents short VGM waits (especially 0x80..0x8F) from losing their
+    // fractional part when each command is converted independently.
+    remainder: u128,
+}
+
+impl TimingAccumulator {
+    fn new() -> Self { Self { remainder: 0 } }
+
+    fn frames_for_wait(&mut self, wait_samples: u64, native_rate: u32) -> usize {
+        self.remainder += wait_samples as u128 * native_rate as u128;
+        let frames = self.remainder / VGM_RATE as u128;
+        self.remainder %= VGM_RATE as u128;
+        frames as usize
+    }
+}
+
+fn render_wait(
+    chip: &mut cxx::UniquePtr<ffi::Chip>,
+    out: &mut Vec<i16>,
+    channels: usize,
+    native_rate: u32,
+    wait: u64,
+    timing: &mut TimingAccumulator,
+    peak: &mut i32,
+) -> u64 {
     if wait == 0 { return 0; }
-    let n = ((wait as u128 * native_rate as u128) + 22_050) / 44_100;
-    let n = n as usize;
+
+    // Convert the VGM 44100-Hz timeline to native YM3438 frames while carrying
+    // the fractional remainder across commands. Do not round each command.
+    let n = timing.frames_for_wait(wait, native_rate);
     if n == 0 { return 0; }
+
     let mut buf = vec![0i32; n * channels];
     chip.pin_mut().generate(&mut buf);
     for x in buf {
@@ -101,12 +130,8 @@ fn run() -> Result<(), String> {
     println!("vgm_loop_position={loop_pos:?}");
     println!("vgm_loop_samples={loop_samples}");
     let mut blocks:HashMap<u8,Vec<u8>>=HashMap::new();
-    let mut out=Vec::<i16>::new();
-    let mut dac_wait_count=[0u64;16];
-    let mut dac_wait_samples=[0u64;16];
-    let mut dac_wait_generated=[0u64;16];
-    let mut dac_wait_ideal=[0f64;16];
-    let mut pos=data_off; let mut dac_pos=0usize; let mut waits=0u64; let mut writes=0u64; let mut dac_writes=0u64; let mut ym_writes=0u64; let mut data_blocks=0u64; let mut commands=0u64; let mut peak=0i32; let mut ended=false; let mut looped_once=false;
+    let mut timing = TimingAccumulator::new();
+    let mut out=Vec::<i16>::new(); let mut pos=data_off; let mut dac_pos=0usize; let mut waits=0u64; let mut writes=0u64; let mut dac_writes=0u64; let mut ym_writes=0u64; let mut data_blocks=0u64; let mut commands=0u64; let mut peak=0i32; let mut ended=false; let mut looped_once=false;
     while !ended {
         if pos>=eof {
             if let Some(lp)=loop_pos {
@@ -118,26 +143,12 @@ fn run() -> Result<(), String> {
         match cmd {
             0x50 => pos+=2,
             0x52|0x53 => { if pos+3>eof {return Err("truncated YM write".into());} let reg=bytes[pos+1]; let val=bytes[pos+2]; let port=if cmd==0x52 {0} else {2}; chip.pin_mut().write(port,reg); chip.pin_mut().write(port+1,val); writes+=1; ym_writes+=1; pos+=3; }
-            0x61 => {let n=u16::from_le_bytes([bytes[pos+1],bytes[pos+2]]) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut peak); waits+=n; pos+=3;}
-            0x62 => {render_wait(&mut chip,&mut out,channels,rate,735,&mut peak); waits+=735; pos+=1;}
-            0x63 => {render_wait(&mut chip,&mut out,channels,rate,882,&mut peak); waits+=882; pos+=1;}
+            0x61 => {let n=u16::from_le_bytes([bytes[pos+1],bytes[pos+2]]) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak); waits+=n; pos+=3;}
+            0x62 => {render_wait(&mut chip,&mut out,channels,rate,735,&mut timing,&mut peak); waits+=735; pos+=1;}
+            0x63 => {render_wait(&mut chip,&mut out,channels,rate,882,&mut timing,&mut peak); waits+=882; pos+=1;}
             0x67 => {let len=command_size(&bytes,pos,eof).ok_or("invalid 0x67 data block")?; let ty=bytes[pos+2]; let n=u32le(&bytes,pos+3) as usize; let st=pos+7; blocks.insert(ty,bytes[st..st+n].to_vec()); data_blocks+=1; if ty==0 {dac_pos=0;} pos+=len;}
-            0x70..=0x7f => {let n=(cmd&0x0f) as u64+1; render_wait(&mut chip,&mut out,channels,rate,n,&mut peak); waits+=n; pos+=1;}
-            0x80..=0x8f => {
-                let bank=blocks.get(&0).ok_or("DAC bank missing")?;
-                if dac_pos>=bank.len() {return Err("DAC bank exhausted".into());}
-                let v=bank[dac_pos]; dac_pos+=1;
-                chip.pin_mut().write(0,0x2a); chip.pin_mut().write(1,v);
-                writes+=1; dac_writes+=1;
-                let n=(cmd&0x0f) as u64;
-                let generated=render_wait(&mut chip,&mut out,channels,rate,n,&mut peak);
-                let idx=n as usize;
-                dac_wait_count[idx]+=1;
-                dac_wait_samples[idx]+=n;
-                dac_wait_generated[idx]+=generated;
-                dac_wait_ideal[idx]+=n as f64 * rate as f64 / VGM_RATE as f64;
-                waits+=n; pos+=1;
-            }
+            0x70..=0x7f => {let n=(cmd&0x0f) as u64+1; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak); waits+=n; pos+=1;}
+            0x80..=0x8f => {let bank=blocks.get(&0).ok_or("DAC bank missing")?; if dac_pos>=bank.len() {return Err("DAC bank exhausted".into());} let v=bank[dac_pos]; dac_pos+=1; chip.pin_mut().write(0,0x2a); chip.pin_mut().write(1,v); writes+=1; dac_writes+=1; let n=(cmd&0x0f) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak); waits+=n; pos+=1;}
             0xe0 => {let off=u32le(&bytes,pos+1) as usize; let bank=blocks.get(&0).ok_or("DAC bank missing")?; if off>=bank.len() {return Err("DAC seek out of range".into());} dac_pos=off; pos+=5;}
             0x66 => {
                 if let Some(lp)=loop_pos {
@@ -152,12 +163,7 @@ fn run() -> Result<(), String> {
         }
     }
     let frames=out.len()/channels;
-    println!("commands={commands}"); println!("register_writes={writes}"); println!("ym_register_writes={ym_writes}"); println!("dac_writes={dac_writes}"); println!("data_blocks={data_blocks}"); println!("wait_samples={waits}"); println!("duration_seconds={:.3}", waits as f64 / VGM_RATE as f64); println!("generated_frames={frames}");
-    println!("dac_wait_diagnostic=true");
-    println!("dac_wait_formula=ideal_frames=wait_value*native_rate/44100; actual=per-command rounded generate frames");
-    for n in 0..16 {
-        println!("dac_wait_{n}: count={} vgm_samples={} ideal_frames={:.6} generated_frames={} diff={:.6}", dac_wait_count[n], dac_wait_samples[n], dac_wait_ideal[n], dac_wait_generated[n], dac_wait_generated[n] as f64 - dac_wait_ideal[n]);
-    } println!("peak_raw={peak}"); println!("output_gain={OUTPUT_GAIN}"); println!("looped_once={looped_once}");
+    println!("commands={commands}"); println!("register_writes={writes}"); println!("ym_register_writes={ym_writes}"); println!("dac_writes={dac_writes}"); println!("data_blocks={data_blocks}"); println!("wait_samples={waits}"); println!("duration_seconds={:.3}", waits as f64 / VGM_RATE as f64); println!("generated_frames={frames}"); println!("peak_raw={peak}"); println!("output_gain={OUTPUT_GAIN}"); println!("looped_once={looped_once}"); println!("timing_remainder_1_44100={}", timing.remainder);
     let preview: Vec<String> = out.iter().take(32).map(|v| v.to_string()).collect();
     println!("pcm_preview={}", preview.join(","));
     if frames==0 || peak==0 {return Err("VGM parsing completed but PCM is silent".into());}
