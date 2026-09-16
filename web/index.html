@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YM3438 VGM → PCM Browser Test</title><style>body{font-family:sans-serif;max-width:800px;margin:28px auto;padding:0 16px}button{font-size:18px;padding:12px 18px}pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto}.ok{color:#080}.ng{color:#b00}audio{width:100%;margin-top:12px}</style></head>
-<body><h1>YM3438 VGM → PCM Browser Test</h1><p>実際の「Emerald Hill Zone.vgz」をWASM内で解析し、YM3438で最初の10秒をPCM化します。WASM側とブラウザ側を分離して診断します。</p><button id="run">Run Emerald Hill Zone → YM3438 → PCM</button><audio id="audio" controls></audio><pre id="log">準備中…</pre>
+<body><h1>YM3438 VGM → PCM Browser Test</h1><p>実際の「Emerald Hill Zone.vgz」をWASM内で解析し、YM3438で曲の終端までPCM化し、VGMのループがあれば1回だけループしてから停止します。出力音量はテスト用に4倍へ調整します。</p><button id="run">Run Emerald Hill Zone → YM3438 → Full PCM</button><audio id="audio" controls></audio><pre id="log">準備中…</pre>
 <script type="module">
 import { init, runWasix } from "https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs";
 const logEl=document.querySelector('#log'), audio=document.querySelector('#audio');
