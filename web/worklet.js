@@ -9,6 +9,8 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
     this.ended = false;
     this.endNotified = false;
     this.paused = false;
+    this.totalSourceFrames = 0;
+    this.reportCounter = 0;
 
     this.port.onmessage = (event) => {
       const m = event.data;
@@ -21,6 +23,8 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         this.ended = false;
         this.endNotified = false;
         this.paused = false;
+        this.totalSourceFrames = (Number(m.startSeconds) || 0) * this.sourceRate;
+        this.reportCounter = 0;
       } else if (m.type === 'chunk') {
         this.queue.push(new Int16Array(m.buffer));
       } else if (m.type === 'end') {
@@ -37,6 +41,8 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         this.ended = false;
         this.endNotified = false;
         this.paused = false;
+        this.totalSourceFrames = 0;
+        this.reportCounter = 0;
       }
     };
   }
@@ -115,6 +121,12 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
       right[i] = (a[1] + (b[1] - a[1]) * frac) / 32768;
 
       this.sourcePos += ratio;
+      this.totalSourceFrames += ratio;
+      this.reportCounter += 1;
+      if (this.reportCounter >= 12) {
+        this.reportCounter = 0;
+        this.port.postMessage({ type: 'progress', seconds: this.totalSourceFrames / this.sourceRate });
+      }
 
       // Remove only the whole source frames that are now behind the cursor.
       const discard = Math.floor(this.sourcePos);

@@ -12,8 +12,9 @@ body{font-family:sans-serif;max-width:800px;margin:24px auto;padding:0 16px;back
 #drop span{color:#666}
 button{font-size:17px;padding:10px 16px;margin:12px 4px 4px 0}
 #file{display:none}
-#seekRow{margin:16px 0 8px}
-#seek{width:100%}
+#seekRow{display:block;margin:16px 0 8px;padding:12px 14px;border:1px solid #ccc;border-radius:10px;background:#fff}
+#seekLabel{display:block;font-weight:600;margin-bottom:6px}
+#seek{display:block;width:100%;height:28px;accent-color:auto}
 #time{font-variant-numeric:tabular-nums;text-align:center;color:#555;margin-top:4px}
 pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:100px}
 .ok{color:#080}.ng{color:#b00}
@@ -32,6 +33,7 @@ pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:1
 <button id="stop" disabled>停止</button>
 </div>
 <div id="seekRow">
+  <span id="seekLabel">再生位置</span>
   <input id="seek" type="range" min="0" max="0" value="0" step="0.01" disabled aria-label="再生位置">
   <div id="time">00:00 / 00:00</div>
 </div>
@@ -72,6 +74,10 @@ function newNode(){
   node=new AudioWorkletNode(audioContext,'pcm-player',{outputChannelCount:[2]});
   node.connect(audioContext.destination);
   node.port.onmessage=e=>{
+    if(e.data?.type==='progress'){
+      if(!seeking) updateTime(e.data.seconds);
+      return;
+    }
     if(e.data?.type==='ended'){
       log('[7] PCM再生終了');
       stopBtn.disabled=true; pauseBtn.disabled=true; playBtn.disabled=false;
@@ -80,9 +86,9 @@ function newNode(){
     }
   };
 }
-async function sendPcm(out, keepPaused=false){
+async function sendPcm(out, keepPaused=false, startSeconds=0){
   const pcmBytes=await out.readFile('/ym3438_output.pcm');
-  node.port.postMessage({type:'init',sampleRate:sourceRate});
+  node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds});
   const CHUNK_BYTES=64*1024;
   for(let off=0;off<pcmBytes.byteLength;off+=CHUNK_BYTES){
     const end=Math.min(off+CHUNK_BYTES,pcmBytes.byteLength);
@@ -117,7 +123,7 @@ async function main(){
     logEl.textContent='';
     log('[1] AudioContext / AudioWorklet準備');
     audioContext=new AudioContext();
-    await audioContext.audioWorklet.addModule('./worklet.js');
+    await audioContext.audioWorklet.addModule('./worklet.js?v=3');
     newNode();
     await audioContext.resume(); log('OK: context='+audioContext.sampleRate+' Hz');
 
@@ -134,6 +140,7 @@ async function main(){
     const stdout=result.stdout ?? result.stdoutUtf8 ?? '';
     log('exit code: '+result.code); log(stdout);
     parseMetadata(stdout);
+    log('[META] 再生時間: '+fmtTime(duration)+' / '+duration.toFixed(3)+' 秒');
 
     log('[6] PCM取得 → AudioWorkletへチャンク転送');
     const out=result.out;
@@ -185,7 +192,7 @@ async function doSeek(seconds){
     parseMetadata(stdout);
     log('[S4] シーク位置までのPCMを破棄済み');
     newNode();
-    const pcmBytes=await sendPcm(result.out,!resumeAfterSeek);
+    const pcmBytes=await sendPcm(result.out,!resumeAfterSeek,target);
     log('[S5] AudioWorkletへ新しいPCMを転送: '+pcmBytes+' bytes');
     updateTime(target);
     if(resumeAfterSeek){
