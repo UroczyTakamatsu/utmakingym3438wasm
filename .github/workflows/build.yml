@@ -1,4 +1,5 @@
-name: Build YM3438 browser test
+name: Build YM3438 browser execution test
+
 on:
   workflow_dispatch:
   push:
@@ -6,6 +7,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -15,7 +17,7 @@ jobs:
         with:
           targets: wasm32-wasip1
 
-      - name: Fetch ymfm-sys
+      - name: Fetch ymfm-sys with upstream ymfm submodule
         run: |
           git clone --recurse-submodules --depth 1 https://github.com/h1romas4/ymfm-sys.git ../ymfm-sys
           git -C ../ymfm-sys submodule status
@@ -28,67 +30,42 @@ jobs:
       - name: Install WASI SDK
         run: |
           set -e
-          SDK_ARCHIVE="wasi-sdk-34.0-x86_64-linux.tar.gz"
-          SDK_DIR="wasi-sdk-34.0-x86_64-linux"
-          wget -q --show-progress "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/${SDK_ARCHIVE}"
-          test -s "${SDK_ARCHIVE}"
-          tar -xzf "${SDK_ARCHIVE}"
-          test -x "${SDK_DIR}/bin/clang++"
-          echo "WASI_SDK_PATH=$PWD/${SDK_DIR}" >> "$GITHUB_ENV"
-          echo "Found WASI SDK: $PWD/${SDK_DIR}"
-          "${SDK_DIR}/bin/clang++" --version
+          ARCHIVE=wasi-sdk-34.0-x86_64-linux.tar.gz
+          DIR=wasi-sdk-34.0-x86_64-linux
+          wget -q --show-progress "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/$ARCHIVE"
+          test -s "$ARCHIVE"
+          tar -xzf "$ARCHIVE"
+          test -x "$DIR/bin/clang++"
+          echo "WASI_SDK_PATH=$PWD/$DIR" >> "$GITHUB_ENV"
+          echo "Found WASI SDK: $PWD/$DIR"
+          "$DIR/bin/clang++" --version
 
       - name: Configure WASI toolchain
         run: |
           echo "$WASI_SDK_PATH/bin" >> "$GITHUB_PATH"
-          echo "CC=$WASI_SDK_PATH/bin/clang" >> "$GITHUB_ENV"
-          echo "CXX=$WASI_SDK_PATH/bin/clang++" >> "$GITHUB_ENV"
-          echo "AR=$WASI_SDK_PATH/bin/llvm-ar" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_WASM32_WASIP1_LINKER=$WASI_SDK_PATH/bin/clang++" >> "$GITHUB_ENV"
-          echo "CXXFLAGS=--sysroot=$WASI_SDK_PATH/share/wasi-sysroot" >> "$GITHUB_ENV"
-          echo "CFLAGS=--sysroot=$WASI_SDK_PATH/share/wasi-sysroot" >> "$GITHUB_ENV"
-          echo "Configured: $WASI_SDK_PATH/bin/clang++"
+          echo "CXX_wasm32_wasip1=$WASI_SDK_PATH/bin/clang++" >> "$GITHUB_ENV"
+          echo "CXXFLAGS_wasm32_wasip1=--target=wasm32-wasip1 --sysroot=$WASI_SDK_PATH/share/wasi-sysroot -fno-exceptions" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_WASM32_WASIP1_LINKER=$WASI_SDK_PATH/bin/clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS=-C link-arg=--sysroot=$WASI_SDK_PATH/share/wasi-sysroot -C link-arg=-lc++ -C link-arg=-lc++abi" >> "$GITHUB_ENV"
 
-      - name: Enable WASM library output in ymfm-sys
+      - name: Build browser test executable
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("../ymfm-sys/Cargo.toml")
-          s = p.read_text()
-          if 'crate-type' not in s:
-              s = s.replace('[lib]\n', '[lib]\ncrate-type = ["cdylib", "rlib"]\n', 1)
-          elif 'cdylib' not in s:
-              s = s.replace('crate-type = ["rlib"]', 'crate-type = ["cdylib", "rlib"]')
-          p.write_text(s)
-          print(p.read_text())
-          PY
+          cargo build --release --target wasm32-wasip1
+          find target/wasm32-wasip1/release -maxdepth 1 -type f -name '*.wasm' -ls
 
-      - name: Build YM3438 WASM library
+      - name: Copy browser WASM
         run: |
-          cargo build --release --target wasm32-wasip1 --manifest-path ../ymfm-sys/Cargo.toml
+          cp target/wasm32-wasip1/release/ym3438-browser-test.wasm web/ym3438_browser_test.wasm
+          ls -lh web/ym3438_browser_test.wasm
 
-      - name: Locate and copy WASM
-        run: |
-          set -e
-          echo "Built WASM files:"
-          find ../ymfm-sys/target/wasm32-wasip1/release -maxdepth 1 -type f -name '*.wasm' -ls || true
-          WASM="$(find ../ymfm-sys/target/wasm32-wasip1/release -maxdepth 1 -type f -name '*.wasm' | head -1)"
-          if [ -z "$WASM" ]; then
-            echo "ERROR: no WASM file was produced"
-            find ../ymfm-sys/target/wasm32-wasip1/release -maxdepth 1 -type f -print
-            exit 1
-          fi
-          cp "$WASM" web/ym3438_test.wasm
-          ls -lh web/ym3438_test.wasm
-
-      - name: Package
+      - name: Package site
         run: |
           mkdir dist
-          cp web/index.html web/ym3438_test.wasm README.md dist/
+          cp web/index.html web/ym3438_browser_test.wasm README.md dist/
           cd dist
           zip -r ../ym3438-browser-test.zip .
 
-      - name: Upload artifact
+      - name: Upload browser test
         uses: actions/upload-artifact@v4
         with:
           name: ym3438-browser-test
