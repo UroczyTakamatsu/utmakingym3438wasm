@@ -1,45 +1,43 @@
-name: Build YM3438 browser execution test
+name: Build and deploy YM3438 browser test
 
 on:
   workflow_dispatch:
   push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
-
       - name: Fetch ymfm-sys with upstream ymfm submodule
         run: |
           git clone --recurse-submodules --depth 1 https://github.com/h1romas4/ymfm-sys.git ../ymfm-sys
-          git -C ../ymfm-sys submodule status
-          find ../ymfm-sys/components/ymfm -maxdepth 2 -type f | head -50
-
       - name: Patch ymfm for WASI
-        run: |
-          sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
-
+        run: sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
       - name: Install WASI SDK
         run: |
           set -e
           ARCHIVE=wasi-sdk-34.0-x86_64-linux.tar.gz
           DIR=wasi-sdk-34.0-x86_64-linux
           wget -q --show-progress "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/$ARCHIVE"
-          test -s "$ARCHIVE"
           tar -xzf "$ARCHIVE"
           test -x "$DIR/bin/clang++"
           echo "WASI_SDK_PATH=$PWD/$DIR" >> "$GITHUB_ENV"
-          echo "Found WASI SDK: $PWD/$DIR"
-          "$DIR/bin/clang++" --version
-
       - name: Configure WASI toolchain
         run: |
           echo "$WASI_SDK_PATH/bin" >> "$GITHUB_PATH"
@@ -47,26 +45,22 @@ jobs:
           echo "CXXFLAGS_wasm32_wasip1=--target=wasm32-wasip1 --sysroot=$WASI_SDK_PATH/share/wasi-sysroot -fno-exceptions" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_WASM32_WASIP1_LINKER=$WASI_SDK_PATH/bin/clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS=-C link-arg=--sysroot=$WASI_SDK_PATH/share/wasi-sysroot -C link-arg=-lc++ -C link-arg=-lc++abi" >> "$GITHUB_ENV"
-
-      - name: Build browser test executable
+      - name: Build WASM
+        run: cargo build --release --target wasm32-wasip1
+      - name: Prepare Pages site
         run: |
-          cargo build --release --target wasm32-wasip1
-          find target/wasm32-wasip1/release -maxdepth 1 -type f -name '*.wasm' -ls
-
-      - name: Copy browser WASM
-        run: |
-          cp target/wasm32-wasip1/release/ym3438-browser-test.wasm web/ym3438_browser_test.wasm
-          ls -lh web/ym3438_browser_test.wasm
-
-      - name: Package site
-        run: |
-          mkdir dist
-          cp web/index.html web/ym3438_browser_test.wasm README.md dist/
-          cd dist
-          zip -r ../ym3438-browser-test.zip .
-
-      - name: Upload browser test
-        uses: actions/upload-artifact@v4
+          mkdir -p dist
+          cp web/index.html coi-serviceworker.js README.md dist/
+          # The WASM is created by the build above; fail clearly if it is absent.
+          cp target/wasm32-wasip1/release/ym3438-browser-test.wasm dist/ym3438_browser_test.wasm
+          test -s dist/ym3438_browser_test.wasm
+          ls -lh dist
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: ym3438-browser-test
-          path: ym3438-browser-test.zip
+          path: dist
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
