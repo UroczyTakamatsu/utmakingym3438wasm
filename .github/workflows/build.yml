@@ -27,19 +27,16 @@ jobs:
 
       - name: Install WASI SDK
         run: |
-          wget -q https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
-          tar -xzf wasi-sdk-34.0-x86_64-linux.tar.gz
-          SDK_DIR="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -path '*/bin/clang++' -printf '%h/..\n' | head -1)"
-          if [ -z "$SDK_DIR" ]; then
-            echo "ERROR: wasi-sdk clang++ was not found"
-            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -name clang++ -print
-            exit 1
-          fi
-          SDK_DIR="$(cd "$SDK_DIR" && pwd)"
-          echo "WASI_SDK_PATH=$SDK_DIR" >> "$GITHUB_ENV"
-          echo "Found WASI SDK: $SDK_DIR"
-          test -x "$SDK_DIR/bin/clang++"
-          "$SDK_DIR/bin/clang++" --version
+          set -e
+          SDK_ARCHIVE="wasi-sdk-34.0-x86_64-linux.tar.gz"
+          SDK_DIR="wasi-sdk-34.0-x86_64-linux"
+          wget -q --show-progress "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/${SDK_ARCHIVE}"
+          test -s "${SDK_ARCHIVE}"
+          tar -xzf "${SDK_ARCHIVE}"
+          test -x "${SDK_DIR}/bin/clang++"
+          echo "WASI_SDK_PATH=$PWD/${SDK_DIR}" >> "$GITHUB_ENV"
+          echo "Found WASI SDK: $PWD/${SDK_DIR}"
+          "${SDK_DIR}/bin/clang++" --version
 
       - name: Configure WASI toolchain
         run: |
