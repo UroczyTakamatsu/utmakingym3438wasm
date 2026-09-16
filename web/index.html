@@ -1,22 +1,26 @@
 <!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YM3438 VGM → PCM Browser Test</title><style>body{font-family:sans-serif;max-width:800px;margin:28px auto;padding:0 16px}button{font-size:18px;padding:12px 18px}pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto}.ok{color:#080}.ng{color:#b00}audio{width:100%;margin-top:12px}</style></head>
-<body><h1>YM3438 VGM → PCM Browser Test</h1><p>実際の「Emerald Hill Zone.vgz」をWASM内で解析し、YM3438で曲の終端までPCM化し、VGMのループがあれば1回だけループしてから停止します。出力音量はテスト用に4倍へ調整します。</p><button id="run">Run Emerald Hill Zone → YM3438 → Full PCM</button><audio id="audio" controls></audio><pre id="log">準備中…</pre>
+<body><h1>YM3438 VGM → PCM Browser Test</h1><p>実際の「Emerald Hill Zone.vgz」をWASM内で解析し、YM3438で曲の終端までPCM化し、VGMのループがあれば1回だけループしてから停止します。出力音量はテスト用に64倍へ調整します。WAVはstdoutではなくWASI共有ディレクトリへ直接生成します。</p><button id="run">Run Emerald Hill Zone → YM3438 → Full PCM</button><audio id="audio" controls></audio><pre id="log">準備中…</pre>
 <script type="module">
-import { init, runWasix } from "https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs";
+import { init, runWasix, Directory } from "https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs";
 const logEl=document.querySelector('#log'), audio=document.querySelector('#audio');
 function log(s){logEl.textContent += s+'\n';}
-function b64ToBlob(b64,type){const bin=atob(b64);const a=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return new Blob([a],{type});}
 async function main(){
   try{
     logEl.textContent=''; audio.removeAttribute('src');
     log('[1] Wasmer SDK初期化'); await init(); log('OK');
     log('[2] WASM読み込み'); const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'}); if(!r.ok)throw new Error('WASM HTTP '+r.status); const bytes=new Uint8Array(await r.arrayBuffer()); log('OK: '+bytes.byteLength+' bytes');
     log('[3] WASMコンパイル'); const module=await WebAssembly.compile(bytes); log('OK');
-    log('[4] VGM → YM3438 → PCM実行'); const instance=await runWasix(module,{args:[]}); const result=await instance.wait();
-    const stdout=result.stdout ?? result.stdoutUtf8 ?? ''; log('exit code: '+result.code); log(stdout.replace(/WAV_BASE64_BEGIN\n[\s\S]*?\nWAV_BASE64_END/,'WAVデータを受信しました。'));
+    log('[4] VGM → YM3438 → PCM実行');
+    const out = new Directory();
+    const instance=await runWasix(module,{args:[],mount:{'/out':out}});
+    const result=await instance.wait();
+    const stdout=result.stdout ?? result.stdoutUtf8 ?? ''; log('exit code: '+result.code); log(stdout);
     if(result.code!==0)throw new Error('YM3438 VGM test exit code '+result.code);
-    const m=stdout.match(/WAV_BASE64_BEGIN\n([A-Za-z0-9+/=\s]+)\nWAV_BASE64_END/); if(!m)throw new Error('WAVデータが見つかりません');
-    const b64=m[1].replace(/\s/g,''); const blob=b64ToBlob(b64,'audio/wav'); const url=URL.createObjectURL(blob); audio.src=url; audio.load(); log('[5] WAVをAudio要素へ設定: OK'); log('再生ボタンを押すと、生成PCMを聴けます。'); log('WAV size: '+blob.size+' bytes');
+    log('[5] WASI共有ディレクトリからWAV取得');
+    const wavBytes=await out.readFile('/ym3438_output.wav');
+    const blob=new Blob([wavBytes],{type:'audio/wav'}); const url=URL.createObjectURL(blob); audio.src=url; audio.load();
+    log('[6] WAVをAudio要素へ設定: OK'); log('再生ボタンを押すと、生成PCMを聴けます。'); log('WAV size: '+blob.size+' bytes');
   }catch(e){log('\nERROR: '+(e?.stack||e)); console.error(e);}
 }
 document.querySelector('#run').onclick=main;
