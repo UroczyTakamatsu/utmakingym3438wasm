@@ -3,80 +3,72 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>YM3438 Browser Test - Diagnostic</title>
-<script src="./coi-serviceworker.js"></script>
+<title>YM3438 Browser Execution Test</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:800px;margin:24px auto;padding:0 16px;line-height:1.5}
-button{font-size:18px;padding:12px 18px;margin:6px 4px 6px 0}pre{background:#f1f1f1;padding:14px;white-space:pre-wrap;overflow:auto}
-.ok{color:#075d07}.bad{color:#a00}.step{margin:4px 0}
+body{font-family:sans-serif;max-width:760px;margin:32px auto;padding:0 16px}
+button{font-size:18px;padding:12px 18px} pre{background:#eee;padding:14px;white-space:pre-wrap}
+.ok{color:#080}.ng{color:#b00}
 </style>
 </head>
 <body>
-<h1>YM3438 Browser Test</h1>
-<p>まずブラウザ → WASI → ymfm-sys → YM3438 の実行だけを確認します。</p>
-<div id="status">ページ読み込み完了。診断を開始してください。</div>
-<button id="run">YM3438テスト開始</button>
-<button id="clear">ログ消去</button>
-<pre id="log"></pre>
-<script type="module">
-const logEl=document.querySelector('#log');
-const statusEl=document.querySelector('#status');
-function log(s){logEl.textContent+=s+'\n';}
-function step(n,s){log(`[${n}] ${s}`);}
-function fail(s,e){log(`\nERROR: ${s}`); if(e) log(String(e?.stack||e)); statusEl.textContent='エラーで停止しました。上のログを確認してください。'; statusEl.className='bad';}
+<h1>YM3438 Browser Execution Test</h1>
+<p>ブラウザ内のWasmerでYM3438 WASMを実行し、PCM生成まで確認します。</p>
+<button id="run">Run YM3438 test</button>
+<pre id="log">ページを初期化しています...</pre>
 
-document.querySelector('#clear').onclick=()=>{logEl.textContent='';statusEl.textContent='ログを消去しました。';};
+<script>
+if ('serviceWorker' in navigator && !window.crossOriginIsolated) {
+  navigator.serviceWorker.register('./coi-serviceworker.js').then(() => {
+    if (!window.crossOriginIsolated) location.reload();
+  }).catch(err => console.warn('COI service worker registration failed', err));
+}
+</script>
+<script type="module">
+import { init, runWasix } from "https://unpkg.com/@wasmer/sdk@latest/dist/index.mjs";
+
+const logEl = document.querySelector("#log");
+function log(s){ logEl.textContent += s + "\n"; }
 
 async function main(){
-  logEl.textContent=''; statusEl.className=''; statusEl.textContent='実行中...';
   try{
-    step(1,'HTML / JavaScript OK');
-    log('URL: '+location.href);
-    log('HTTPS: '+(location.protocol==='https:'));
-    log('crossOriginIsolated: '+window.crossOriginIsolated);
-    log('SharedArrayBuffer: '+(typeof SharedArrayBuffer==='function'));
-    log('ServiceWorker controller: '+(!!navigator.serviceWorker?.controller));
-    if(!window.crossOriginIsolated){
-      fail('crossOriginIsolated が false です。GitHub Pagesでは初回読み込み後に自動再読み込みされます。再読み込み後にもう一度実行してください。');
-      return;
+    logEl.textContent = "";
+    log("[1] HTML / JavaScript OK");
+    log("[2] Loading Wasmer SDK...");
+    await init();
+    log("[3] Wasmer SDK initialized.");
+
+    const response = await fetch("./ym3438_browser_test.wasm");
+    if(!response.ok) throw new Error("WASM HTTP "+response.status);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    log("[4] WASM loaded: "+bytes.byteLength+" bytes");
+
+    const module = await WebAssembly.compile(bytes);
+    log("[5] WASM compiled.");
+
+    log("[6] Starting WASI program...");
+    const instance = await runWasix(module, { args: [] });
+    const result = await instance.wait();
+
+    log("[7] Program finished. Exit code: " + result.code);
+    log("stdout:");
+    log(result.stdout ?? result.stdoutUtf8 ?? "");
+    if(result.stderr ?? result.stderrUtf8) {
+      log("stderr:");
+      log(result.stderr ?? result.stderrUtf8);
     }
 
-    step(2,'Wasmer SDK を読み込みます');
-    const sdk=await import('https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs');
-    log('SDK exports: '+Object.keys(sdk).join(', '));
-    if(typeof sdk.init!=='function'||typeof sdk.runWasix!=='function') throw new Error('このSDKに init/runWasix がありません');
-    step(3,'Wasmer SDK 初期化');
-    await sdk.init();
-    log('SDK initialized');
-
-    step(4,'YM3438 WASM を取得');
-    const response=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'});
-    log('HTTP '+response.status+' '+response.statusText);
-    if(!response.ok) throw new Error('WASM HTTP '+response.status);
-    const bytes=new Uint8Array(await response.arrayBuffer());
-    log('WASM size: '+bytes.byteLength.toLocaleString()+' bytes');
-    if(bytes.length<8) throw new Error('WASMファイルが小さすぎます');
-
-    step(5,'WASMをコンパイル');
-    const module=await WebAssembly.compile(bytes);
-    log('WebAssembly.compile OK');
-
-    step(6,'WASIプログラムを実行');
-    const instance=await sdk.runWasix(module,{program:'ym3438_browser_test.wasm',args:[],env:{}});
-    log('runWasix OK');
-
-    step(7,'プログラム終了を待機');
-    const result=await instance.wait();
-    log('exit code: '+result.code);
-    const out=result.stdoutUtf8??result.stdout??'';
-    const err=result.stderrUtf8??result.stderr??'';
-    log('stdout:\n'+out);
-    if(err) log('stderr:\n'+err);
-    if(result.code!==0) throw new Error('YM3438テストが終了コード '+result.code+' で終了しました');
-    statusEl.textContent='成功：YM3438からPCMが生成されました。'; statusEl.className='ok';
-    log('\nSUCCESS');
-  }catch(e){fail('処理中に例外が発生しました。',e);}
+    if(result.code === 0){
+      log("\nSUCCESS: YM3438 WASM generated non-zero PCM.");
+    }else{
+      log("\nFAILED: YM3438 program returned a non-zero exit code.");
+    }
+  }catch(e){
+    log("\nERROR: "+(e?.stack || e));
+    console.error(e);
+  }
 }
-document.querySelector('#run').onclick=main;
+
+document.querySelector("#run").onclick = main;
 </script>
-</body></html>
+</body>
+</html>
