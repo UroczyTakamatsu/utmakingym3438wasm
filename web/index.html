@@ -1,20 +1,66 @@
 <!doctype html>
-<html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>YM3438 Browser Test</title>
-<style>body{font-family:sans-serif;max-width:720px;margin:40px auto;padding:0 16px}button{font-size:18px;padding:12px 20px}pre{white-space:pre-wrap;background:#eee;padding:12px}</style>
-<h1>YM3438 Browser Test</h1>
-<button id="start">Start</button><pre id="log"></pre>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YM3438 Browser Execution Test</title>
+<style>
+body{font-family:sans-serif;max-width:760px;margin:32px auto;padding:0 16px}
+button{font-size:18px;padding:12px 18px} pre{background:#eee;padding:14px;white-space:pre-wrap}
+.ok{color:#080}.ng{color:#b00}
+</style>
+</head>
+<body>
+<h1>YM3438 Browser Execution Test</h1>
+<p>ブラウザ内のWasmerでYM3438 WASMを実行し、PCM生成まで確認します。</p>
+<button id="run">Run YM3438 test</button>
+<pre id="log">準備中...</pre>
+
 <script type="module">
-const out=document.querySelector("#log"), log=(x,ok=true)=>out.textContent+=(ok?"✓ ":"✗ ")+x+"\n";
-try{
- const r=await fetch("./ym3438_test.wasm"); if(!r.ok) throw Error("HTTP "+r.status);
- const b=await r.arrayBuffer(); log("WASM loaded: "+b.byteLength+" bytes");
- const m=new WebAssembly.Module(b); log("WASM module parsed");
- const im=WebAssembly.Module.imports(m); log("Imports: "+(im.length?im.map(x=>x.module+"."+x.name).join(", "):"none"));
- try{const x=await WebAssembly.instantiate(b,{});log("Direct instantiate succeeded");log("Exports: "+Object.keys(x.instance.exports).join(", "))}
- catch(e){log("Direct instantiate failed: "+e.name+": "+e.message,false);log("WASI executable detected/expected; next step is browser-reactor conversion.")}
-}catch(e){log(e.name+": "+e.message,false)}
-document.querySelector("#start").onclick=async()=>{
- try{const AC=AudioContext||webkitAudioContext,ac=new AC();await ac.resume();const o=ac.createOscillator(),g=ac.createGain();g.gain.value=.04;o.frequency.value=440;o.connect(g).connect(ac.destination);o.start();o.stop(ac.currentTime+.25);log("Web Audio test tone played at "+ac.sampleRate+" Hz")}catch(e){log(e.name+": "+e.message,false)}
-};
+import { init, runWasix } from "https://unpkg.com/@wasmer/sdk@latest/dist/index.mjs";
+
+const logEl = document.querySelector("#log");
+function log(s){ logEl.textContent += s + "\n"; }
+
+async function main(){
+  try{
+    logEl.textContent = "";
+    log("Loading Wasmer SDK...");
+    await init();
+    log("Wasmer SDK initialized.");
+
+    const response = await fetch("./ym3438_browser_test.wasm");
+    if(!response.ok) throw new Error("WASM HTTP "+response.status);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    log("WASM loaded: "+bytes.byteLength+" bytes");
+
+    const module = await WebAssembly.compile(bytes);
+    log("WASM compiled.");
+
+    log("Starting WASI program...");
+    const instance = await runWasix(module, { args: [] });
+    const result = await instance.wait();
+
+    log("Program exit code: " + result.code);
+    log("stdout:");
+    log(result.stdout ?? result.stdoutUtf8 ?? "");
+    if(result.stderr ?? result.stderrUtf8) {
+      log("stderr:");
+      log(result.stderr ?? result.stderrUtf8);
+    }
+
+    if(result.code === 0){
+      log("\nSUCCESS: YM3438 WASM generated non-zero PCM.");
+    }else{
+      log("\nFAILED: YM3438 program returned a non-zero exit code.");
+    }
+  }catch(e){
+    log("\nERROR: "+(e?.stack || e));
+    console.error(e);
+  }
+}
+
+document.querySelector("#run").onclick = main;
 </script>
+</body>
+</html>
