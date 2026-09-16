@@ -2,13 +2,16 @@ name: Build YM3438 browser test
 on:
   workflow_dispatch:
   push:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
 
@@ -19,15 +22,26 @@ jobs:
           find ../ymfm-sys/components/ymfm -maxdepth 2 -type f | head -50
 
       - name: Patch ymfm for WASI
-        run: sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
+        run: |
+          sed -i '1i#include <cstdlib>' ../ymfm-sys/components/ymfm/src/ymfm_opq.cpp
 
       - name: Install WASI SDK
         run: |
           wget -q https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
           tar -xzf wasi-sdk-34.0-x86_64-linux.tar.gz
-          echo "WASI_SDK_PATH=$PWD/wasi-sdk-34.0" >> "$GITHUB_ENV"
+          SDK_DIR="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -path '*/bin/clang++' -printf '%h/..\n' | head -1)"
+          if [ -z "$SDK_DIR" ]; then
+            echo "ERROR: wasi-sdk clang++ was not found"
+            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -name clang++ -print
+            exit 1
+          fi
+          SDK_DIR="$(cd "$SDK_DIR" && pwd)"
+          echo "WASI_SDK_PATH=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "Found WASI SDK: $SDK_DIR"
+          test -x "$SDK_DIR/bin/clang++"
+          "$SDK_DIR/bin/clang++" --version
 
-      - name: Configure WASI
+      - name: Configure WASI toolchain
         run: |
           echo "$WASI_SDK_PATH/bin" >> "$GITHUB_PATH"
           echo "CC=$WASI_SDK_PATH/bin/clang" >> "$GITHUB_ENV"
@@ -36,20 +50,26 @@ jobs:
           echo "CARGO_TARGET_WASM32_WASIP1_LINKER=$WASI_SDK_PATH/bin/clang++" >> "$GITHUB_ENV"
           echo "CXXFLAGS=--sysroot=$WASI_SDK_PATH/share/wasi-sysroot" >> "$GITHUB_ENV"
           echo "CFLAGS=--sysroot=$WASI_SDK_PATH/share/wasi-sysroot" >> "$GITHUB_ENV"
+          echo "Configured: $WASI_SDK_PATH/bin/clang++"
 
       - name: Build proven YM3438 WASM
-        run: cargo build --release --target wasm32-wasip1 --manifest-path ../ymfm-sys/Cargo.toml
+        run: |
+          cargo build --release --target wasm32-wasip1 --manifest-path ../ymfm-sys/Cargo.toml
 
       - name: Copy WASM
-        run: cp ../ymfm-sys/target/wasm32-wasip1/release/ymfm-sys.wasm web/ym3438_test.wasm
+        run: |
+          cp ../ymfm-sys/target/wasm32-wasip1/release/ymfm-sys.wasm web/ym3438_test.wasm
+          ls -lh web/ym3438_test.wasm
 
       - name: Package
         run: |
           mkdir dist
           cp web/index.html web/ym3438_test.wasm README.md dist/
-          cd dist && zip -r ../ym3438-browser-test.zip .
+          cd dist
+          zip -r ../ym3438-browser-test.zip .
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ym3438-browser-test
           path: ym3438-browser-test.zip
