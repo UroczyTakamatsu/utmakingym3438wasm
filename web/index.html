@@ -1,125 +1,23 @@
 <!doctype html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>YM3438 Browser Execution Test</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:800px;margin:24px auto;padding:0 16px;line-height:1.5}
-button{font-size:18px;padding:12px 18px;margin:6px 4px 6px 0}
-pre{background:#f1f1f1;padding:14px;white-space:pre-wrap;overflow:auto}
-.ok{color:#075d07}.bad{color:#a00}
-</style>
-</head>
-<body>
-<h1>YM3438 Browser Test</h1>
-<p>ブラウザ → Wasmer/WASI → ymfm-sys → YM3438 → PCM の順に確認します。</p>
-<div id="status">ページ読み込み中…</div>
-<button id="run" disabled>YM3438テスト開始</button>
-<button id="clear">ログ消去</button>
-<pre id="log"></pre>
-
-<script src="./coi-serviceworker.js"></script>
-<script>
-(function () {
-  const log = document.querySelector('#log');
-  function add(s){ log.textContent += s + '\n'; }
-  add('[boot] HTML / JavaScript OK');
-  add('[boot] HTTPS: ' + (location.protocol === 'https:'));
-  add('[boot] crossOriginIsolated: ' + window.crossOriginIsolated);
-  add('[boot] SharedArrayBuffer: ' + (typeof SharedArrayBuffer === 'function'));
-  add('[boot] ServiceWorker controller: ' + (!!navigator.serviceWorker?.controller));
-
-  async function waitForIsolation(){
-    if(window.crossOriginIsolated) return true;
-    if(!('serviceWorker' in navigator)) return false;
-    await new Promise(resolve => {
-      const timer = setTimeout(resolve, 5000);
-      navigator.serviceWorker.addEventListener('controllerchange', () => {
-        clearTimeout(timer);
-        setTimeout(resolve, 100);
-      }, {once:true});
-    });
-    return window.crossOriginIsolated;
-  }
-
-  waitForIsolation().then(ok => {
-    const status=document.querySelector('#status');
-    const button=document.querySelector('#run');
-    if(ok){
-      status.textContent='初期化完了。テストを開始できます。';
-      status.className='ok';
-      button.disabled=false;
-      add('[boot] Cross-Origin Isolation: OK');
-    }else{
-      status.textContent='Cross-Origin Isolation の初期化に失敗しました。ページを再読み込みしてください。';
-      status.className='bad';
-      add('[boot] Cross-Origin Isolation: NG');
-      add('[hint] ブラウザを再読み込みするとService Workerが有効になる場合があります。');
-    }
-  });
-})();
-</script>
-
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YM3438 VGM → PCM Browser Test</title><style>body{font-family:sans-serif;max-width:800px;margin:28px auto;padding:0 16px}button{font-size:18px;padding:12px 18px}pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto}.ok{color:#080}.ng{color:#b00}audio{width:100%;margin-top:12px}</style></head>
+<body><h1>YM3438 VGM → PCM Browser Test</h1><p>実際の「Opening Theme.vgz」をWASM内で解析し、YM3438でPCMを生成してブラウザ再生します。</p><button id="run">Run VGM → YM3438 → PCM</button><audio id="audio" controls></audio><pre id="log">準備中…</pre>
 <script type="module">
-const logEl=document.querySelector('#log');
-const statusEl=document.querySelector('#status');
-const runButton=document.querySelector('#run');
-function log(s){logEl.textContent+=s+'\n';}
-function fail(s,e){log('\nERROR: '+s);if(e)log(String(e?.stack||e));statusEl.textContent='エラーで停止しました。ログを確認してください。';statusEl.className='bad';}
-
-document.querySelector('#clear').onclick=()=>{logEl.textContent='';statusEl.textContent=window.crossOriginIsolated?'ログを消去しました。テストを開始できます。':'ログを消去しました。';};
-
-runButton.onclick=async()=>{
-  runButton.disabled=true;
+import { init, runWasix } from "https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs";
+const logEl=document.querySelector('#log'), audio=document.querySelector('#audio');
+function log(s){logEl.textContent += s+'\n';}
+function b64ToBlob(b64,type){const bin=atob(b64);const a=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return new Blob([a],{type});}
+async function main(){
   try{
-    log('\n[1] 実行時環境を確認');
-    log('crossOriginIsolated: '+window.crossOriginIsolated);
-    log('SharedArrayBuffer: '+(typeof SharedArrayBuffer==='function'));
-    if(!window.crossOriginIsolated) throw new Error('crossOriginIsolated が false です');
-
-    log('[2] Wasmer SDK を読み込み');
-    // runWasix is intentionally pinned to the known API used by this test.
-    const sdk=await import('https://unpkg.com/@wasmer/sdk@0.9.0/dist/index.mjs');
-    log('SDK exports: '+Object.keys(sdk).join(', '));
-    if(typeof sdk.init!=='function') throw new Error('Wasmer SDK の init が見つかりません');
-    if(typeof sdk.runWasix!=='function') throw new Error('Wasmer SDK の runWasix が見つかりません');
-
-    log('[3] Wasmer SDK 初期化');
-    await sdk.init();
-    log('SDK initialized');
-
-    log('[4] YM3438 WASM を取得');
-    const response=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'});
-    log('HTTP '+response.status+' '+response.statusText);
-    if(!response.ok) throw new Error('WASM HTTP '+response.status);
-    const bytes=new Uint8Array(await response.arrayBuffer());
-    log('WASM size: '+bytes.byteLength.toLocaleString()+' bytes');
-    if(bytes.length<8) throw new Error('WASMファイルが小さすぎます');
-
-    log('[5] WASMをコンパイル');
-    const module=await WebAssembly.compile(bytes);
-    log('WebAssembly.compile OK');
-
-    log('[6] WASIプログラムを実行');
-    const instance=await sdk.runWasix(module,{program:'ym3438_browser_test.wasm',args:[],env:{}});
-    log('runWasix OK');
-
-    log('[7] プログラム終了を待機');
-    const result=await instance.wait();
-    log('exit code: '+result.code);
-    const out=result.stdoutUtf8??result.stdout??'';
-    const err=result.stderrUtf8??result.stderr??'';
-    log('stdout:\n'+out);
-    if(err) log('stderr:\n'+err);
-    if(result.code!==0) throw new Error('YM3438テストが終了コード '+result.code+' で終了しました');
-
-    statusEl.textContent='成功：YM3438からPCMが生成されました。';
-    statusEl.className='ok';
-    log('\nSUCCESS: browser → Wasmer/WASI → ymfm-sys → YM3438 → PCM OK');
-  }catch(e){fail('処理中に例外が発生しました。',e);}
-  finally{runButton.disabled=false;}
-};
-</script>
-</body>
-</html>
+    logEl.textContent=''; audio.removeAttribute('src');
+    log('[1] Wasmer SDK初期化'); await init(); log('OK');
+    log('[2] WASM読み込み'); const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'}); if(!r.ok)throw new Error('WASM HTTP '+r.status); const bytes=new Uint8Array(await r.arrayBuffer()); log('OK: '+bytes.byteLength+' bytes');
+    log('[3] WASMコンパイル'); const module=await WebAssembly.compile(bytes); log('OK');
+    log('[4] VGM → YM3438 → PCM実行'); const instance=await runWasix(module,{args:[]}); const result=await instance.wait();
+    const stdout=result.stdout ?? result.stdoutUtf8 ?? ''; log('exit code: '+result.code); log(stdout.replace(/WAV_BASE64_BEGIN\n[\s\S]*?\nWAV_BASE64_END/,'WAVデータを受信しました。'));
+    if(result.code!==0)throw new Error('YM3438 VGM test exit code '+result.code);
+    const m=stdout.match(/WAV_BASE64_BEGIN\n([A-Za-z0-9+/=\s]+)\nWAV_BASE64_END/); if(!m)throw new Error('WAVデータが見つかりません');
+    const b64=m[1].replace(/\s/g,''); const blob=b64ToBlob(b64,'audio/wav'); const url=URL.createObjectURL(blob); audio.src=url; audio.load(); log('[5] WAVをAudio要素へ設定: OK'); log('再生ボタンを押すと、生成PCMを聴けます。');
+  }catch(e){log('\nERROR: '+(e?.stack||e)); console.error(e);}
+}
+document.querySelector('#run').onclick=main;
+</script></body></html>
