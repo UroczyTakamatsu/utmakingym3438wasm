@@ -39,24 +39,48 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
     const out=outputs[0],left=out[0],right=out[1]||out[0];
     if(this.paused||!this.ready){left.fill(0);if(out[1])right.fill(0);return true;}
     const ratio=this.sourceRate/sampleRate;
-    const validLoop=this.hasLoop&&this.loopEndFrame>this.loopStartFrame&&this.loopEndFrame<=this.totalFrames;
+    const loopEnd=Math.min(this.loopEndFrame,this.totalFrames);
+    const validLoop=this.hasLoop&&loopEnd>this.loopStartFrame&&this.loopStartFrame>=0;
     for(let i=0;i<left.length;i++){
-      if(validLoop&&this.loopEnabled&&this.sourcePos>=this.loopEndFrame){const len=this.loopEndFrame-this.loopStartFrame;this.sourcePos=this.loopStartFrame+((this.sourcePos-this.loopEndFrame)%len);this.endNotified=false;this.port.postMessage({type:'loop'});}
-      if(validLoop&&!this.loopEnabled&&this.sourcePos>=this.loopEndFrame){this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;}
-      if(!validLoop&&!this.loopEnabled&&this.sourcePos>=this.totalFrames-1){this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;}
-      if(!validLoop&&this.loopEnabled&&this.sourcePos>=this.totalFrames-1){this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;}
-      const base=Math.floor(this.sourcePos),frac=this.sourcePos-base;let next=base+1;
-      if(validLoop&&this.loopEnabled&&next>=this.loopEndFrame)next=this.loopStartFrame;
-      let l=0,r=0;
-      for(let s=0;s<this.streams;s++){
-        if(this.muted[s])continue;
-        const a=this.frameAt(s,base),b=this.frameAt(s,next);if(!a||!b)continue;
-        l+=(a[0]+(b[0]-a[0])*frac)/32768;r+=(a[1]+(b[1]-a[1])*frac)/32768;
+      // Loop before reading the first sample beyond the loop boundary.
+      if(validLoop&&this.loopEnabled&&this.sourcePos>=loopEnd){
+        const overshoot=this.sourcePos-loopEnd;
+        const len=loopEnd-this.loopStartFrame;
+        this.sourcePos=this.loopStartFrame+(overshoot%len);
+        this.endNotified=false;
+        this.port.postMessage({type:'loop'});
       }
-      left[i]=Math.max(-1,Math.min(1,l));right[i]=Math.max(-1,Math.min(1,r));this.sourcePos+=ratio;
+      if(validLoop&&!this.loopEnabled&&this.sourcePos>=loopEnd){
+        this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;
+      }
+      if(!validLoop&&!this.loopEnabled&&this.sourcePos>=this.totalFrames-1){
+        this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;
+      }
+      if(!validLoop&&this.loopEnabled&&this.sourcePos>=this.totalFrames-1){
+        this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;
+      }
+      const base=Math.floor(this.sourcePos),frac=this.sourcePos-base;
+      let next=base+1;
+      if(validLoop&&this.loopEnabled&&next>=loopEnd)next=this.loopStartFrame;
+      let l=0,r=0;
+      for(let st=0;st<this.streams;st++){
+        if(this.muted[st])continue;
+        const a=this.frameAt(st,base),b=this.frameAt(st,next);if(!a||!b)continue;
+        l+=(a[0]+(b[0]-a[0])*frac)/32768;
+        r+=(a[1]+(b[1]-a[1])*frac)/32768;
+      }
+      left[i]=Math.max(-1,Math.min(1,l));right[i]=Math.max(-1,Math.min(1,r));
+      this.sourcePos+=ratio;
+      // Handle a boundary crossed within this output sample block immediately.
+      if(validLoop&&this.loopEnabled&&this.sourcePos>=loopEnd){
+        const overshoot=this.sourcePos-loopEnd;
+        const len=loopEnd-this.loopStartFrame;
+        this.sourcePos=this.loopStartFrame+(overshoot%len);
+        this.endNotified=false;
+        this.port.postMessage({type:'loop'});
+      }
       if(++this.reportCounter>=12){this.reportCounter=0;this.port.postMessage({type:'progress',seconds:this.progressSeconds()});}
     }
     return true;
-  }
-}
+  }}
 registerProcessor('pcm-player',PcmPlayerProcessor);
