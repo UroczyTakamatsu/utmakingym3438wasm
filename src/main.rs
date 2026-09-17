@@ -133,7 +133,7 @@ impl PsgChip {
                 self.noise_phase -= 1.0;
                 let white = (self.noise & 0x04) != 0;
                 let feedback = if white {
-                    ((self.lfsr ^ (self.lfsr >> 1)) & 1)
+                    (self.lfsr ^ (self.lfsr >> 1)) & 1
                 } else {
                     (self.lfsr >> 14) & 1
                 };
@@ -249,12 +249,12 @@ fn run() -> Result<(), String> {
         match cmd {
             0x50=>{ if pos+2>eof{return Err("truncated PSG write".into());} psg.write(bytes[pos+1]); pos+=2; },
             0x52|0x53=>{if pos+3>eof{return Err("truncated YM write".into());} let reg=bytes[pos+1];let val=bytes[pos+2]; for (s,sc) in streams.iter_mut().enumerate(){apply_ym_write(sc,s,cmd,reg,val);} writes+=1;ym_writes+=1;pos+=3;}
-            0x61=>{let n=u16::from_le_bytes([bytes[pos+1],bytes[pos+2]]) as u64;let (gen,skip)=render_wait(&mut streams,channels,rate,n,&mut timing,&mut skip_frames,&mut peak);psg.generate(gen as usize,skip,OUTPUT_GAIN);waits+=n;timeline_samples+=n;pos+=3;}
-            0x62=>{let (gen,skip)=render_wait(&mut streams,channels,rate,735,&mut timing,&mut skip_frames,&mut peak);psg.generate(gen as usize,skip,OUTPUT_GAIN);waits+=735;timeline_samples+=735;pos+=1;}
-            0x63=>{let (gen,skip)=render_wait(&mut streams,channels,rate,882,&mut timing,&mut skip_frames,&mut peak);psg.generate(gen as usize,skip,OUTPUT_GAIN);waits+=882;timeline_samples+=882;pos+=1;}
+            0x61=>{let n=u16::from_le_bytes([bytes[pos+1],bytes[pos+2]]) as u64;let (generated_frames,skip)=render_wait(&mut streams,channels,rate,n,&mut timing,&mut skip_frames,&mut peak);psg.generate(generated_frames as usize,skip,OUTPUT_GAIN);waits+=n;timeline_samples+=n;pos+=3;}
+            0x62=>{let (generated_frames,skip)=render_wait(&mut streams,channels,rate,735,&mut timing,&mut skip_frames,&mut peak);psg.generate(generated_frames as usize,skip,OUTPUT_GAIN);waits+=735;timeline_samples+=735;pos+=1;}
+            0x63=>{let (generated_frames,skip)=render_wait(&mut streams,channels,rate,882,&mut timing,&mut skip_frames,&mut peak);psg.generate(generated_frames as usize,skip,OUTPUT_GAIN);waits+=882;timeline_samples+=882;pos+=1;}
             0x67=>{let len=command_size(&bytes,pos,eof).ok_or("invalid 0x67 data block")?;let ty=bytes[pos+2];let n=u32le(&bytes,pos+3) as usize;let st=pos+7;if st+n>eof{return Err("truncated 0x67 data block".into());}blocks.insert(ty,bytes[st..st+n].to_vec());data_blocks+=1;if ty==0{dac_pos=0;}pos+=len;}
-            0x70..=0x7f=>{let n=(cmd&0x0f) as u64+1;let (gen,skip)=render_wait(&mut streams,channels,rate,n,&mut timing,&mut skip_frames,&mut peak);psg.generate(gen as usize,skip,OUTPUT_GAIN);waits+=n;timeline_samples+=n;pos+=1;}
-            0x80..=0x8f=>{let bank=blocks.get(&0).ok_or("DAC bank missing")?;if dac_pos>=bank.len(){return Err("DAC bank exhausted".into());}let v=bank[dac_pos];dac_pos+=1;for (s,sc) in streams.iter_mut().enumerate(){apply_ym_write(sc,s,0x52,0x2a,v);}writes+=1;dac_writes+=1;let n=(cmd&0x0f) as u64;let (gen,skip)=render_wait(&mut streams,channels,rate,n,&mut timing,&mut skip_frames,&mut peak);psg.generate(gen as usize,skip,OUTPUT_GAIN);waits+=n;timeline_samples+=n;pos+=1;}
+            0x70..=0x7f=>{let n=(cmd&0x0f) as u64+1;let (generated_frames,skip)=render_wait(&mut streams,channels,rate,n,&mut timing,&mut skip_frames,&mut peak);psg.generate(generated_frames as usize,skip,OUTPUT_GAIN);waits+=n;timeline_samples+=n;pos+=1;}
+            0x80..=0x8f=>{let bank=blocks.get(&0).ok_or("DAC bank missing")?;if dac_pos>=bank.len(){return Err("DAC bank exhausted".into());}let v=bank[dac_pos];dac_pos+=1;for (s,sc) in streams.iter_mut().enumerate(){apply_ym_write(sc,s,0x52,0x2a,v);}writes+=1;dac_writes+=1;let n=(cmd&0x0f) as u64;let (generated_frames,skip)=render_wait(&mut streams,channels,rate,n,&mut timing,&mut skip_frames,&mut peak);psg.generate(generated_frames as usize,skip,OUTPUT_GAIN);waits+=n;timeline_samples+=n;pos+=1;}
             0xe0=>{let off=u32le(&bytes,pos+1) as usize;let bank=blocks.get(&0).ok_or("DAC bank missing")?;if off>=bank.len(){return Err("DAC seek out of range".into());}dac_pos=off;pos+=5;}
             0x66=>{if loop_start_samples.is_some(){loop_end_samples=Some(timeline_samples);}ended=true;}
             _=>{let len=command_size(&bytes,pos,eof).ok_or_else(||format!("unsupported command 0x{cmd:02X} at 0x{pos:X}"))?;pos+=len;}
