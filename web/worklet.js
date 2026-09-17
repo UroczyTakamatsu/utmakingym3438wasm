@@ -13,11 +13,12 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         this.sourceRate=Number(m.sampleRate)||sampleRate;this.sourcePos=Number(m.initialOffsetFrames)||0;
         this.ended=false;this.endNotified=false;this.paused=false;this.loopEnabled=!!m.loopEnabled;this.hasLoop=!!m.hasLoop;
         this.timelineStartSeconds=Number(m.startSeconds)||0;this.loopStartFrame=Number(m.loopStartFrame)||0;this.loopEndFrame=Number(m.loopEndFrame)||0;this.reportCounter=0;
+        this.port.postMessage({type:'loop-debug',message:'init: loopEnabled='+this.loopEnabled+' hasLoop='+this.hasLoop+' loopStartFrame='+this.loopStartFrame+' loopEndFrame='+this.loopEndFrame+' sourcePos='+this.sourcePos+' sourceRate='+this.sourceRate});
       }else if(m.type==='chunk'){
         const stream=Number(m.stream);if(stream<0||stream>=this.streams)return;
         const data=new Int16Array(m.buffer);const start=this.chunks[stream].reduce((n,c)=>n+Math.floor(c.data.length/2),0);this.chunks[stream].push({data,startFrame:start});
         if(stream===this.streams-1)this.totalFrames=start+Math.floor(data.length/2);
-      }else if(m.type==='end'){this.totalFrames=this.chunks.reduce((max,cs)=>Math.max(max,cs.length?cs[cs.length-1].startFrame+Math.floor(cs[cs.length-1].data.length/2):0),0);if(this.hasLoop){this.loopStartFrame=Math.min(this.loopStartFrame,this.totalFrames);this.loopEndFrame=Math.min(this.loopEndFrame,this.totalFrames);}this.ready=true;this.ended=true;}
+      }else if(m.type==='end'){this.totalFrames=this.chunks.reduce((max,cs)=>Math.max(max,cs.length?cs[cs.length-1].startFrame+Math.floor(cs[cs.length-1].data.length/2):0),0);if(this.hasLoop){this.loopStartFrame=Math.min(this.loopStartFrame,this.totalFrames);this.loopEndFrame=Math.min(this.loopEndFrame,this.totalFrames);}this.ready=true;this.ended=true;this.port.postMessage({type:'loop-debug',message:'end: totalFrames='+this.totalFrames+' loopEnabled='+this.loopEnabled+' hasLoop='+this.hasLoop+' loopStartFrame='+this.loopStartFrame+' loopEndFrame='+this.loopEndFrame+' validLoop='+(this.hasLoop&&this.loopEndFrame>this.loopStartFrame&&this.loopStartFrame>=0)});}
       else if(m.type==='pause'){this.paused=true;}
       else if(m.type==='resume'){this.paused=false;}
       else if(m.type==='setLoop'){this.loopEnabled=!!m.enabled;this.endNotified=false;}
@@ -48,7 +49,7 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         const len=loopEnd-this.loopStartFrame;
         this.sourcePos=this.loopStartFrame+(overshoot%len);
         this.endNotified=false;
-        this.port.postMessage({type:'loop'});
+        this.port.postMessage({type:'loop',sourcePos:this.sourcePos,loopEndFrame:loopEnd,loopStartFrame:this.loopStartFrame,overshoot:overshoot});
       }
       if(validLoop&&!this.loopEnabled&&this.sourcePos>=loopEnd){
         this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;
@@ -77,7 +78,7 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         const len=loopEnd-this.loopStartFrame;
         this.sourcePos=this.loopStartFrame+(overshoot%len);
         this.endNotified=false;
-        this.port.postMessage({type:'loop'});
+        this.port.postMessage({type:'loop',sourcePos:this.sourcePos,loopEndFrame:loopEnd,loopStartFrame:this.loopStartFrame,overshoot:overshoot});
       }
       if(++this.reportCounter>=12){this.reportCounter=0;this.port.postMessage({type:'progress',seconds:this.progressSeconds()});}
     }

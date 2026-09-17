@@ -61,7 +61,8 @@ function newNode(){
   node.port.onmessage=e=>{
     const m=e.data||{};
     if(m.type==='progress'){if(!seeking&&!scrubbing)updateTime(m.seconds);}
-    else if(m.type==='loop'){log('[7] ループ境界へ到達 → ループ先頭へシームレスに復帰');}
+    else if(m.type==='loop'){log('[LOOP-HIT] Workletがループ境界を検出: sourcePos='+m.sourcePos+' endFrame='+m.loopEndFrame+' → startFrame='+m.loopStartFrame+' overshoot='+m.overshoot);log('[7] ループ境界へ到達 → ループ先頭へシームレスに復帰');}
+    else if(m.type==='loop-debug'){log('[LOOP-DEBUG] '+m.message);}
     else if(m.type==='ended')handlePlaybackEnded();
   };
 }
@@ -70,6 +71,7 @@ async function sendPcm(out,startSeconds,initialSeconds=startSeconds){
   const relativeLoopStart=hasLoop&&loopStartSeconds!==null?Math.max(0,(loopStartSeconds-startSeconds)*sourceRate):0;
   const relativeLoopEnd=hasLoop&&loopEndSeconds!==null?Math.max(0,(loopEndSeconds-startSeconds)*sourceRate):0;
   const initialOffsetFrames=Math.max(0,(initialSeconds-startSeconds)*sourceRate);
+  log('[LOOP-SEND] enabled='+loopEnabled+' hasLoop='+hasLoop+' startFrame='+relativeLoopStart.toFixed(3)+' endFrame='+relativeLoopEnd.toFixed(3)+' initialOffset='+initialOffsetFrames.toFixed(3)+' startSeconds='+startSeconds.toFixed(3));
   node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds,initialOffsetFrames,loopEnabled,hasLoop,loopStartFrame:relativeLoopStart,loopEndFrame:relativeLoopEnd});
   for(let stream=0;stream<10;stream++){
     const name=stream<6?`/ym3438_fm${stream+1}.pcm`:stream===6?'/ym3438_dac.pcm':`/psg${stream-6}.pcm`;
@@ -79,6 +81,7 @@ async function sendPcm(out,startSeconds,initialSeconds=startSeconds){
   }
   for(let stream=0;stream<10;stream++)node.port.postMessage({type:'mute',stream,muted:streamMuted[stream]});
   node.port.postMessage({type:'end'});
+  log('[LOOP-SEND] 全PCM転送完了 → Workletへend送信');
   return true;
 }
 
@@ -129,6 +132,7 @@ function parseMetadata(stdout,preserveLoopState=false){
   if(channels!==2)throw new Error('このAudioWorkletプレイヤーはステレオPCMのみ対応です');
   seekEl.max=String(duration);seekEl.value=String(Math.min(currentSeconds,duration));updateTime(currentSeconds);updateLoopUI();
   log('[META] duration='+duration.toFixed(3)+'s, loop='+(hasLoop?loopStartSeconds.toFixed(3)+'s → '+loopEndSeconds.toFixed(3)+'s':'なし'));
+  log('[LOOP-STATE] parseMetadata: hasLoop='+hasLoop+' loopEnabled='+loopEnabled+' previousLoopEnabled='+previousLoopEnabled);
 }
 
 async function main(){
