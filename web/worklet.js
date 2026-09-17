@@ -46,30 +46,78 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
   }
   process(_inputs,outputs){
     const out=outputs[0], left=out[0], right=out[1]||out[0];
-    if(this.paused||!this.ready){left.fill(0);if(out[1])right.fill(0);return true;}
-    const ratio=this.sourceRate/sampleRate;
-    const hasValidLoop=this.hasLoop&&this.loopEndFrame!==null&&this.loopEndFrame>0;
-    for(let i=0;i<left.length;i++){
-      if(hasValidLoop&&this.loopEnabled&&this.sourcePos>=this.loopEndFrame){
-        const start=this.loopStartFrame===null?0:this.loopStartFrame;
-        const len=this.loopEndFrame-start;
-        if(len>0)this.sourcePos=start+((this.sourcePos-this.loopEndFrame)%len);
-        this.endNotified=false;
-        this.port.postMessage({type:'loop'});
-      }
-      if(hasValidLoop&&!this.loopEnabled&&this.sourcePos>=this.loopEndFrame){this.finish(out,i);continue;}
-      if(!hasValidLoop&&this.sourcePos>=this.totalFrames-1){this.finish(out,i);continue;}
-      if(this.sourcePos>=this.totalFrames-1){this.finish(out,i);continue;}
+    if(this.paused||!this.ready){
+      left.fill(0);
+      if(out[1])right.fill(0);
+      return true;
+    }
 
-      const base=Math.floor(this.sourcePos), frac=this.sourcePos-base;
+    const ratio=this.sourceRate/sampleRate;
+    let loopStart=Number.isFinite(this.loopStartFrame)?this.loopStartFrame:0;
+    let loopEnd=Number.isFinite(this.loopEndFrame)?this.loopEndFrame:this.totalFrames;
+    const hasValidLoop=this.hasLoop &&
+      loopEnd>0 &&
+      loopEnd<=this.totalFrames &&
+      loopStart>=0 &&
+      loopStart<loopEnd;
+
+    for(let i=0;i<left.length;i++){
+      // If the current source position is already at/past the loop end,
+      // wrap before reading the next sample.
+      if(hasValidLoop && this.loopEnabled && this.sourcePos>=loopEnd){
+        const loopLength=loopEnd-loopStart;
+        this.sourcePos=loopStart + ((this.sourcePos-loopEnd)%loopLength);
+        this.endNotified=false;
+        this.port.postMessage({type:'loop',seconds:this.progressSeconds()});
+      }
+
+      // Loop OFF: the first pass ends at the VGM loop end.
+      if(hasValidLoop && !this.loopEnabled && this.sourcePos>=loopEnd){
+        this.finish(out,i);
+        continue;
+      }
+
+      // No loop: play until the end of the PCM.
+      if(!hasValidLoop && this.sourcePos>=this.totalFrames-1){
+        this.finish(out,i);
+        continue;
+      }
+
+      const base=Math.floor(this.sourcePos);
+      const frac=this.sourcePos-base;
+
+      // Normally interpolate base -> base+1.
+      // At the loop boundary interpolate base -> loopStart, so the
+      // boundary itself is seamless and does not read past loopEnd.
       let next=base+1;
-      if(hasValidLoop&&this.loopEnabled&&this.loopEndFrame!==null&&next>=this.loopEndFrame){next=this.loopStartFrame===null?0:this.loopStartFrame;}
-      const a=this.frameAt(base), b=this.frameAt(next);
-      if(!a||!b){this.finish(out,i);continue;}
+      let bFrame=next;
+      if(hasValidLoop && this.loopEnabled && next>=loopEnd){
+        bFrame=loopStart;
+      }
+
+      const a=this.frameAt(base);
+      const b=this.frameAt(bFrame);
+      if(!a||!b){
+        this.finish(out,i);
+        continue;
+      }
+
       left[i]=(a[0]+(b[0]-a[0])*frac)/32768;
       right[i]=(a[1]+(b[1]-a[1])*frac)/32768;
-      this.sourcePos+=ratio;
-      if(++this.reportCounter>=12){this.reportCounter=0;this.port.postMessage({type:'progress',seconds:this.progressSeconds()});}
+
+      const nextPos=this.sourcePos+ratio;
+
+      // If this output sample crosses the loop boundary, keep the exact
+      // fractional overshoot and wrap it into the loop on the next sample.
+      this.sourcePos=nextPos;
+
+      if(++this.reportCounter>=12){
+        this.reportCounter=0;
+        this.port.postMessage({
+          type:'progress',
+          seconds:this.progressSeconds()
+        });
+      }
     }
     return true;
   }

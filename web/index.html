@@ -142,7 +142,7 @@ async function main(){
     logEl.textContent='';
     log('[1] AudioContext / AudioWorklet準備');
     audioContext=new AudioContext();
-    await audioContext.audioWorklet.addModule('./worklet.js?v=5');
+    await audioContext.audioWorklet.addModule('./worklet.js?v=6');
     newNode();
     await audioContext.resume(); log('OK: context='+audioContext.sampleRate+' Hz');
 
