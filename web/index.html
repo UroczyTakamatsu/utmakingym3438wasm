@@ -239,21 +239,21 @@ async function doSeek(seconds){
 function toggleLoop(){
   const next=!loopEnabled;
   if(next && (loopStartSeconds===null || loopEndSeconds===null || loopEndSeconds<=loopStartSeconds)){
-    log('[LOOP] このVGMにはループ情報がないためONにできません');
+    log('[LOOP] この曲にはループ情報がないためONにできません');
     return;
   }
-
   loopEnabled=next;
   loopBtn.textContent=loopEnabled?'ループ: ON':'ループ: OFF';
   updateSeekVisibility();
   if(node) node.port.postMessage({type:'setLoop',enabled:loopEnabled});
-
+  log('[LOOP] '+(loopEnabled?'オン':'オフ'));
   if(loopEnabled){
     seekEl.disabled=true;
-    log('[LOOP] オン → 現在のPCMからループ継続');
-  }else{
+  }else if(duration>0){
     seekEl.disabled=!running;
-    log('[LOOP] オフ → ループ再生中なら1回目の位置へ戻して終了');
+    if(running && currentSeconds>duration){
+      updateTime(duration);
+    }
   }
 }
 
