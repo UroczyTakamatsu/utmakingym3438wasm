@@ -9,6 +9,7 @@ const VGM_RATE: u64 = 44_100;
 const FALLBACK_YM_CLOCK: u32 = 7_670_454;
 const OUTPUT_GAIN: i32 = 128;
 const PSG_OUTPUT_GAIN: i32 = 1;
+const PSG_OUTPUT_SCALE: f64 = 512.0;
 const PSG_CLOCK_SCALE: f64 = 1.0;
 const FM_STREAMS: usize = 7; // FM1..FM6 + DAC
 const PSG_STREAMS: usize = 3;
@@ -151,7 +152,7 @@ impl PsgChip {
                 } else {
                     -Self::level(self.volume[ch])
                 };
-                let v = (sample * 4096.0 * gain as f64).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+                let v = (sample * PSG_OUTPUT_SCALE * gain as f64).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
                 // AudioWorklet expects every stream to be stereo interleaved,
                 // just like the YM3438 streams. PSG itself is mono, so duplicate
                 // each channel sample to L/R. This also keeps one PSG sample =
