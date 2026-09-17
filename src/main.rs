@@ -64,13 +64,13 @@ fn run()->Result<(),String>{
         let cmd=bytes[pos]; commands+=1;
         match cmd{
             0x50=>{if pos+2>eof{return Err("0x50末尾不正".into())}pos+=2;register_writes+=1;}
-            0x52|0x53=>{if pos+3>eof{return Err(format!("0x{cmd:02X}末尾不正"))}chip.pin_mut().write((cmd-0x52) as u8,bytes[pos+1],bytes[pos+2]);pos+=3;register_writes+=1;ym_register_writes+=1;}
+            0x52|0x53=>{if pos+3>eof{return Err(format!("0x{cmd:02X}末尾不正"))}let offset = if cmd == 0x52 { 0 } else { 2 };chip.pin_mut().write(offset, bytes[pos + 1]);chip.pin_mut().write(offset + 1, bytes[pos + 2]);pos+=3;register_writes+=1;ym_register_writes+=1;}
             0x61=>{if pos+3>eof{return Err("0x61末尾不正".into())}let n=read_u16(&bytes,pos+1) as u64;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=3;}
             0x62=>{let n=735;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=1;}
             0x63=>{let n=882;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=1;}
             0x67=>{if pos+7>eof||bytes[pos+1]!=0x66{return Err(format!("0x67不正: 0x{pos:X}"))}let typ=bytes[pos+2];let len=read_u32(&bytes,pos+3) as usize;let start=pos+7;let end=start.checked_add(len).ok_or("0x67長さオーバーフロー")?;if end>eof{return Err("0x67が末尾越え".into())}if typ==0{dac_data=bytes[start..end].to_vec();dac_pos=0;}data_blocks+=1;pos=end;}
             0x70..=0x7f=>{let n=(cmd&0x0f) as u64+1;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=1;}
-            0x80..=0x8f=>{let n=(cmd&0x0f) as u64;if dac_pos<dac_data.len(){chip.pin_mut().write(0,0x2a,dac_data[dac_pos]);dac_pos+=1;dac_writes+=1;}if n>0{wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;}pos+=1;}
+            0x80..=0x8f=>{let n=(cmd&0x0f) as u64;if dac_pos<dac_data.len(){chip.pin_mut().write(0, 0x2a);chip.pin_mut().write(1, dac_data[dac_pos]);dac_pos+=1;dac_writes+=1;}if n>0{wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;}pos+=1;}
             0xe0=>{if pos+5>eof{return Err("0xE0末尾不正".into())}dac_pos=read_u32(&bytes,pos+1) as usize;pos+=5;}
             0x66=>{loop_end_samples=if loop_pos.is_some(){Some(timeline_samples)}else{None};loop_end_output_frame=if loop_pos.is_some(){Some((out.len()/channels) as u64)}else{None};pos+=1;break;}
             _=>return Err(format!("未対応VGMコマンド 0x{cmd:02X} at 0x{pos:X}")),
