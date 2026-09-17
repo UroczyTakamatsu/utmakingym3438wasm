@@ -1,71 +1,16 @@
 use flate2::read::GzDecoder;
-use std::io::Read;
-use std::fs;
 use std::env;
+use std::fs;
+use std::io::Read;
 use ymfm_sys::ffi;
-use std::collections::HashMap;
 
 const VGM_RATE: u64 = 44_100;
 const FALLBACK_YM_CLOCK: u32 = 7_670_454;
-const OUTPUT_GAIN: i32 = 128; // Final PCM gain; YM3438 synthesis itself is unchanged.
-fn u32le(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-}
+const OUTPUT_GAIN: i32 = 128;
 
-fn load_vgm_input() -> Result<Vec<u8>, String> {
-    const INPUT_PATH: &str = "/in/input.vgm";
-    let input = fs::read(INPUT_PATH).map_err(|e| format!("failed to read {INPUT_PATH}: {e}"))?;
-    if input.len() >= 2 && input[0] == 0x1f && input[1] == 0x8b {
-        let mut d = GzDecoder::new(&input[..]);
-        let mut out = Vec::new();
-        d.read_to_end(&mut out).map_err(|e| format!("VGZ gzip decode failed: {e}"))?;
-        Ok(out)
-    } else {
-        Ok(input)
-    }
-}
-
-fn command_size(bytes: &[u8], pos: usize, eof: usize) -> Option<usize> {
-    if pos >= eof { return None; }
-    let c = bytes[pos];
-    let len = match c {
-        0x30..=0x3f => 2,
-        0x40..=0x4e => 3,
-        0x4f..=0x50 => 2,
-        0x51..=0x5f => 3,
-        0x60 => 1,
-        0x61 => 3,
-        0x62..=0x66 => 1,
-        0x67 => {
-            if pos + 7 > eof || bytes[pos + 1] != 0x66 { return None; }
-            7usize.checked_add(u32le(bytes, pos + 3) as usize)?
-        }
-        0x68 => 12,
-        0x69..=0x6a => 1,
-        0x70..=0x8f => 1,
-        0x90..=0x91 => 5,
-        0x92 => 6,
-        0x93 => 11,
-        0x94 => 2,
-        0x95 => 5,
-        0xa0..=0xbf => 3,
-        0xc0..=0xdf => 4,
-        0xe0..=0xff => 5,
-        _ => return None,
-    };
-    if pos.checked_add(len)? <= eof { Some(len) } else { None }
-}
-
-struct TimingAccumulator {
-    // Fractional native-rate frames are kept in units of 1/44100 frame.
-    // This prevents short VGM waits (especially 0x80..0x8F) from losing their
-    // fractional part when each command is converted independently.
-    remainder: u128,
-}
-
+struct TimingAccumulator { remainder: u128 }
 impl TimingAccumulator {
     fn new() -> Self { Self { remainder: 0 } }
-
     fn frames_for_wait(&mut self, wait_samples: u64, native_rate: u32) -> usize {
         self.remainder += wait_samples as u128 * native_rate as u128;
         let frames = self.remainder / VGM_RATE as u128;
@@ -73,129 +18,75 @@ impl TimingAccumulator {
         frames as usize
     }
 }
-
-fn render_wait(
-    chip: &mut cxx::UniquePtr<ffi::Chip>,
-    out: &mut Vec<i16>,
-    channels: usize,
-    native_rate: u32,
-    wait: u64,
-    timing: &mut TimingAccumulator,
-    peak: &mut i32,
-    skip_frames: &mut u64,
-) -> u64 {
-    if wait == 0 { return 0; }
-    let n = timing.frames_for_wait(wait, native_rate);
-    if n == 0 { return 0; }
-    let mut buf = vec![0i32; n * channels];
-    chip.pin_mut().generate(&mut buf);
-    for x in &buf { *peak = (*peak).max(x.abs()); }
-
-    let skip = (*skip_frames).min(n as u64) as usize;
-    *skip_frames -= skip as u64;
-    for &x in &buf[skip * channels..] {
-        let y = ((x >> 8) * OUTPUT_GAIN).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        out.push(y);
-    }
-    n as u64
+fn read_u32(b:&[u8],p:usize)->u32{u32::from_le_bytes([b[p],b[p+1],b[p+2],b[p+3]])}
+fn read_u16(b:&[u8],p:usize)->u16{u16::from_le_bytes([b[p],b[p+1]])}
+fn decode_vgm(input:&[u8])->Result<Vec<u8>,String>{
+    if input.len()>=2 && input[0]==0x1f && input[1]==0x8b {
+        let mut d=GzDecoder::new(input); let mut out=Vec::new();
+        d.read_to_end(&mut out).map_err(|e|format!("VGZ展開失敗: {e}"))?; Ok(out)
+    } else { Ok(input.to_vec()) }
 }
-
-fn main() {
-    if let Err(e)=run() { eprintln!("ERROR: {e}"); std::process::exit(2); }
+fn render_wait(chip:&mut cxx::UniquePtr<ffi::Chip>,out:&mut Vec<i16>,channels:usize,native_rate:u32,wait:u64,timing:&mut TimingAccumulator,peak:&mut i32,skip_frames:&mut u64){
+    if wait==0{return}
+    let n=timing.frames_for_wait(wait,native_rate); if n==0{return}
+    let mut buf=vec![0i32;n*channels]; chip.pin_mut().generate(&mut buf);
+    for &x in &buf{*peak=(*peak).max(x.abs());}
+    let skip=(*skip_frames).min(n as u64) as usize; *skip_frames-=skip as u64;
+    for &x in &buf[skip*channels..]{out.push(((x>>8)*OUTPUT_GAIN).clamp(i16::MIN as i32,i16::MAX as i32) as i16);}
 }
-
-fn run() -> Result<(), String> {
-    let seek_ms: u64 = env::args().skip(1).find_map(|a| a.strip_prefix("--seek-ms=").and_then(|v| v.parse().ok())).unwrap_or(0);
-    let loop_enabled = env::args().skip(1).any(|a| a == "--loop=1");
-    println!("YM3438 browser VGM/VGZ -> PCM diagnostic test");
-    println!("seek_ms={seek_ms}");
-    println!("loop_enabled={loop_enabled}");
-    let input_meta = fs::metadata("/in/input.vgm").map_err(|e| format!("input file metadata failed: {e}"))?;
-    println!("input_bytes={}", input_meta.len());
-    let bytes=load_vgm_input()?;
-    println!("vgm_decompressed_bytes={}", bytes.len());
-    if bytes.len()<0x40 || &bytes[0..4]!=b"Vgm " { return Err("not a VGM file".into()); }
-    let version=u32le(&bytes,0x08);
-    let data_off=if version>=0x0001_0050 { let r=u32le(&bytes,0x34); if r==0 {0x40} else {0x34+r as usize} } else {0x40};
-    let eof_rel=u32le(&bytes,0x04);
-    let eof=if eof_rel==0 {bytes.len()} else {(0x04+eof_rel as usize).min(bytes.len())};
-    let clock_raw=u32le(&bytes,0x2c);
-    let clock=if clock_raw & 0x3fff_ffff != 0 {clock_raw & 0x3fff_ffff} else {FALLBACK_YM_CLOCK};
-    println!("vgm_version=0x{version:08X}");
-    println!("vgm_data_offset=0x{data_off:X}");
-    println!("ym2612_clock={clock}");
-    if data_off>=eof {return Err("invalid VGM data offset".into());}
-    let mut chip=ffi::create_chip(ffi::ChipType::Ym3438,clock);
-    chip.pin_mut().reset();
-    let channels=chip.channels() as usize; let rate=chip.sample_rate() as u32;
-    println!("ym3438_channels={channels}"); println!("ym3438_native_rate={rate}");
-    let target_frames = ((seek_ms as u128 * rate as u128 * 44100u128) / (1000u128 * 44100u128)) as u64;
-    let mut skip_frames = target_frames;
-    println!("seek_target_native_frames={target_frames}");
-    let loop_rel=u32le(&bytes,0x1c);
-    let loop_pos=if loop_rel==0 {None} else {Some(0x1c + loop_rel as usize)};
-    let loop_samples=u32le(&bytes,0x20);
-    println!("vgm_loop_position={loop_pos:?}");
-    println!("vgm_loop_samples={loop_samples}");
-    let mut blocks:HashMap<u8,Vec<u8>>=HashMap::new();
-    let mut timeline_samples: u64 = 0;
-    let mut loop_start_samples: Option<u64> = None;
-    let mut loop_end_samples: Option<u64> = None;
-    let mut timing = TimingAccumulator::new();
-    let mut out=Vec::<i16>::new(); let mut pos=data_off; let mut dac_pos=0usize; let mut waits=0u64; let mut writes=0u64; let mut dac_writes=0u64; let mut ym_writes=0u64; let mut data_blocks=0u64; let mut commands=0u64; let mut peak=0i32; let mut ended=false; let mut looped_once=false;
-    while !ended {
-        if pos>=eof {
-            if let Some(lp)=loop_pos {
-                if !looped_once && lp < eof { pos=lp; looped_once=true; continue; }
-            }
-            break;
+fn run()->Result<(),String>{
+    let args:Vec<String>=env::args().skip(1).collect();
+    let seek_ms:u64=args.iter().find_map(|a|a.strip_prefix("--seek-ms=").and_then(|v|v.parse().ok())).unwrap_or(0);
+    println!("YM3438 browser VGM/VGZ -> PCM diagnostic test"); println!("seek_ms={seek_ms}");
+    let input=fs::read("/in/input.vgm").map_err(|e|format!("入力読み込み失敗: {e}"))?;
+    println!("input_bytes={}",input.len()); let bytes=decode_vgm(&input)?; println!("vgm_decompressed_bytes={}",bytes.len());
+    if bytes.len()<0x40 || &bytes[0..4]!=b"Vgm "{return Err("VGMヘッダが見つかりません".into());}
+    let version=read_u32(&bytes,0x08);
+    let data_offset=if version>=0x150{let r=read_u32(&bytes,0x34);if r==0{0x40}else{0x34+r as usize}}else{0x40};
+    let total_samples=read_u32(&bytes,0x18) as u64;
+    let loop_rel=read_u32(&bytes,0x1c); let loop_pos=if loop_rel==0{None}else{Some(0x1cusize+loop_rel as usize)};
+    println!("vgm_version=0x{version:08X}"); println!("vgm_data_offset=0x{data_offset:X}"); println!("vgm_total_samples={total_samples}");
+    println!("vgm_loop_position={}",loop_pos.map(|p|format!("0x{p:X}")).unwrap_or_else(||"none".into()));
+    let clock={let c=read_u32(&bytes,0x2c);if c==0{FALLBACK_YM_CLOCK}else{c}};
+    let mut chip=ffi::create_chip(ffi::ChipType::Ym3438,clock); if chip.is_null(){return Err("YM3438チップ生成失敗".into());}
+    let channels=chip.channels() as usize; let native_rate=chip.sample_rate() as u32; chip.pin_mut().reset();
+    println!("ym2612_clock={clock}"); println!("ym3438_channels={channels}"); println!("ym3438_native_rate={native_rate}");
+    let target_frames=((seek_ms as u128*native_rate as u128)/1000) as u64; let mut skip_frames=target_frames;
+    let mut pos=data_offset; let eof=bytes.len(); let mut timeline_samples=0u64;
+    let mut loop_start_samples=None::<u64>; let mut loop_end_samples=None::<u64>;
+    let mut loop_start_output_frame=None::<u64>; let mut loop_end_output_frame=None::<u64>;
+    let mut timing=TimingAccumulator::new(); let mut out=Vec::<i16>::new(); let mut commands=0u64; let mut register_writes=0u64; let mut ym_register_writes=0u64; let mut dac_writes=0u64; let mut data_blocks=0u64; let mut wait_samples=0u64; let mut peak=0i32; let mut dac_data=Vec::new(); let mut dac_pos=0usize;
+    while pos<eof{
+        if Some(pos)==loop_pos && loop_start_samples.is_none(){
+            loop_start_samples=Some(timeline_samples);
+            if timeline_samples.saturating_mul(native_rate as u64) >= target_frames.saturating_mul(VGM_RATE){loop_start_output_frame=Some((out.len()/channels) as u64);}
         }
         let cmd=bytes[pos]; commands+=1;
-        if Some(pos) == loop_pos && loop_start_samples.is_none() { loop_start_samples = Some(timeline_samples); }
-        match cmd {
-            0x50 => pos+=2,
-            0x52|0x53 => { if pos+3>eof {return Err("truncated YM write".into());} let reg=bytes[pos+1]; let val=bytes[pos+2]; let port=if cmd==0x52 {0} else {2}; chip.pin_mut().write(port,reg); chip.pin_mut().write(port+1,val); writes+=1; ym_writes+=1; pos+=3; }
-            0x61 => {let n=u16::from_le_bytes([bytes[pos+1],bytes[pos+2]]) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak,&mut skip_frames); waits+=n; timeline_samples+=n; pos+=3;}
-            0x62 => {render_wait(&mut chip,&mut out,channels,rate,735,&mut timing,&mut peak,&mut skip_frames); waits+=735; timeline_samples+=735; pos+=1;}
-            0x63 => {render_wait(&mut chip,&mut out,channels,rate,882,&mut timing,&mut peak,&mut skip_frames); waits+=882; timeline_samples+=882; pos+=1;}
-            0x67 => {let len=command_size(&bytes,pos,eof).ok_or("invalid 0x67 data block")?; let ty=bytes[pos+2]; let n=u32le(&bytes,pos+3) as usize; let st=pos+7; blocks.insert(ty,bytes[st..st+n].to_vec()); data_blocks+=1; if ty==0 {dac_pos=0;} pos+=len;}
-            0x70..=0x7f => {let n=(cmd&0x0f) as u64+1; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak,&mut skip_frames); waits+=n; timeline_samples+=n; pos+=1;}
-            0x80..=0x8f => {let bank=blocks.get(&0).ok_or("DAC bank missing")?; if dac_pos>=bank.len() {return Err("DAC bank exhausted".into());} let v=bank[dac_pos]; dac_pos+=1; chip.pin_mut().write(0,0x2a); chip.pin_mut().write(1,v); writes+=1; dac_writes+=1; let n=(cmd&0x0f) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak,&mut skip_frames); waits+=n; timeline_samples+=n; pos+=1;}
-            0xe0 => {let off=u32le(&bytes,pos+1) as usize; let bank=blocks.get(&0).ok_or("DAC bank missing")?; if off>=bank.len() {return Err("DAC seek out of range".into());} dac_pos=off; pos+=5;}
-            0x66 => {
-                if let Some(lp)=loop_pos {
-                    if !looped_once && lp < eof {
-                        loop_end_samples = Some(timeline_samples);
-                        println!("vgm_end_reached=true; preparing seamless loop from 0x{lp:X}");
-                        pos=lp; looped_once=true; continue;
-                    }
-                }
-                ended=true;
-            }
-            _ => {let len=command_size(&bytes,pos,eof).ok_or_else(||format!("unsupported command 0x{cmd:02X} at 0x{pos:X}"))?; pos+=len;}
+        match cmd{
+            0x50=>{if pos+2>eof{return Err("0x50末尾不正".into())}pos+=2;register_writes+=1;}
+            0x52|0x53=>{if pos+3>eof{return Err(format!("0x{cmd:02X}末尾不正"))}chip.pin_mut().write((cmd-0x52) as u8,bytes[pos+1],bytes[pos+2]);pos+=3;register_writes+=1;ym_register_writes+=1;}
+            0x61=>{if pos+3>eof{return Err("0x61末尾不正".into())}let n=read_u16(&bytes,pos+1) as u64;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=3;}
+            0x62=>{let n=735;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=1;}
+            0x63=>{let n=882;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=1;}
+            0x67=>{if pos+7>eof||bytes[pos+1]!=0x66{return Err(format!("0x67不正: 0x{pos:X}"))}let typ=bytes[pos+2];let len=read_u32(&bytes,pos+3) as usize;let start=pos+7;let end=start.checked_add(len).ok_or("0x67長さオーバーフロー")?;if end>eof{return Err("0x67が末尾越え".into())}if typ==0{dac_data=bytes[start..end].to_vec();dac_pos=0;}data_blocks+=1;pos=end;}
+            0x70..=0x7f=>{let n=(cmd&0x0f) as u64+1;wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;pos+=1;}
+            0x80..=0x8f=>{let n=(cmd&0x0f) as u64;if dac_pos<dac_data.len(){chip.pin_mut().write(0,0x2a,dac_data[dac_pos]);dac_pos+=1;dac_writes+=1;}if n>0{wait_samples+=n;render_wait(&mut chip,&mut out,channels,native_rate,n,&mut timing,&mut peak,&mut skip_frames);timeline_samples+=n;}pos+=1;}
+            0xe0=>{if pos+5>eof{return Err("0xE0末尾不正".into())}dac_pos=read_u32(&bytes,pos+1) as usize;pos+=5;}
+            0x66=>{loop_end_samples=if loop_pos.is_some(){Some(timeline_samples)}else{None};loop_end_output_frame=if loop_pos.is_some(){Some((out.len()/channels) as u64)}else{None};pos+=1;break;}
+            _=>return Err(format!("未対応VGMコマンド 0x{cmd:02X} at 0x{pos:X}")),
         }
+        if let Some(ls)=loop_start_samples{if loop_start_output_frame.is_none() && ls.saturating_mul(native_rate as u64)<target_frames.saturating_mul(VGM_RATE){loop_start_output_frame=Some(0);}}
     }
-    let frames=out.len()/channels;
-    println!("commands={commands}"); println!("register_writes={writes}"); println!("ym_register_writes={ym_writes}"); println!("dac_writes={dac_writes}"); println!("data_blocks={data_blocks}"); println!("wait_samples={waits}"); let timeline_duration = waits as f64 / VGM_RATE as f64;
-    let loop_start_seconds = loop_start_samples.map(|v| v as f64 / VGM_RATE as f64);
-    let loop_end_seconds = loop_end_samples.map(|v| v as f64 / VGM_RATE as f64);
-    println!("duration_seconds={:.3}", timeline_duration);
-    println!("timeline_duration_seconds={:.6}", timeline_duration);
-    println!("loop_start_seconds={}", loop_start_seconds.map(|v| format!("{v:.6}")).unwrap_or_else(|| "none".into()));
-    println!("loop_end_seconds={}", loop_end_seconds.map(|v| format!("{v:.6}")).unwrap_or_else(|| "none".into()));
-    println!("generated_frames={frames}");
-    println!("skipped_native_frames={}", target_frames.saturating_sub(skip_frames));
-    println!("seek_effective_seconds={:.6}", target_frames as f64 / rate as f64); println!("peak_raw={peak}"); println!("output_gain={OUTPUT_GAIN}"); println!("looped_once={looped_once}"); println!("timing_remainder_1_44100={}", timing.remainder);
-    let preview: Vec<String> = out.iter().take(32).map(|v| v.to_string()).collect();
-    println!("pcm_preview={}", preview.join(","));
-    if frames==0 || peak==0 {return Err("VGM parsing completed but PCM is silent".into());}
-    const OUTPUT_PATH: &str = "/out/ym3438_output.pcm";
-    let mut pcm_bytes = Vec::with_capacity(out.len() * 2);
-    for s in &out { pcm_bytes.extend_from_slice(&s.to_le_bytes()); }
-    fs::write(OUTPUT_PATH, &pcm_bytes).map_err(|e| format!("failed to write {OUTPUT_PATH}: {e}"))?;
-    println!("pcm_path={OUTPUT_PATH}");
-    println!("pcm_bytes={}", pcm_bytes.len());
-    println!("pcm_channels={channels}");
-    println!("pcm_sample_rate={rate}");
-    Ok(())
+    if loop_pos.is_some(){loop_end_samples.get_or_insert(timeline_samples);loop_end_output_frame.get_or_insert((out.len()/channels) as u64);}
+    let frames=(out.len()/channels) as u64; let duration=timeline_samples as f64/VGM_RATE as f64;
+    println!("commands={commands}");println!("register_writes={register_writes}");println!("ym_register_writes={ym_register_writes}");println!("dac_writes={dac_writes}");println!("data_blocks={data_blocks}");println!("wait_samples={wait_samples}");println!("duration_seconds={duration:.6}");println!("timeline_duration_seconds={duration:.6}");println!("generated_frames={frames}");println!("output_total_frames={frames}");println!("peak_raw={peak}");println!("output_gain={OUTPUT_GAIN}");println!("timing_remainder_1_44100={}",timing.remainder);println!("skipped_native_frames={}",target_frames.saturating_sub(skip_frames));println!("seek_effective_seconds={:.6}",target_frames as f64/native_rate as f64);
+    if let Some(v)=loop_start_samples{println!("loop_start_seconds={:.6}",v as f64/VGM_RATE as f64)}else{println!("loop_start_seconds=none")}
+    if let Some(v)=loop_end_samples{println!("loop_end_seconds={:.6}",v as f64/VGM_RATE as f64)}else{println!("loop_end_seconds=none")}
+    if let Some(v)=loop_start_output_frame{println!("loop_start_output_frame={v}")}else{println!("loop_start_output_frame=none")}
+    if let Some(v)=loop_end_output_frame{println!("loop_end_output_frame={v}")}else{println!("loop_end_output_frame=none")}
+    if frames==0{return Err("PCMが生成されませんでした".into())}
+    let mut pcm=Vec::with_capacity(out.len()*2);for s in out{pcm.extend_from_slice(&s.to_le_bytes());}
+    fs::create_dir_all("/out").map_err(|e|format!("/out作成失敗: {e}"))?;fs::write("/out/ym3438_output.pcm",&pcm).map_err(|e|format!("PCM書き込み失敗: {e}"))?;
+    println!("pcm_path=/out/ym3438_output.pcm");println!("pcm_bytes={}",pcm.len());println!("pcm_channels={channels}");println!("pcm_sample_rate={native_rate}");Ok(())
 }
+fn main(){if let Err(e)=run(){eprintln!("ERROR: {e}");std::process::exit(1);}}
