@@ -1,7 +1,7 @@
 class PcmPlayerProcessor extends AudioWorkletProcessor {
   constructor(){
     super();
-    this.streams=7;this.chunks=Array.from({length:this.streams},()=>[]);this.totalFrames=0;
+    this.streams=10;this.chunks=Array.from({length:this.streams},()=>[]);this.totalFrames=0;
     this.ready=false;this.sourcePos=0;this.sourceRate=sampleRate;
     this.ended=false;this.endNotified=false;this.paused=false;this.loopEnabled=false;this.hasLoop=false;
     this.loopStartFrame=0;this.loopEndFrame=0;this.timelineStartSeconds=0;this.reportCounter=0;

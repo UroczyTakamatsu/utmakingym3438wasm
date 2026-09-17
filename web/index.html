@@ -44,8 +44,8 @@ let sourceRate=44100,channels=2,duration=0,currentSeconds=0;
 let loopEnabled=true,hasLoop=false,loopStartSeconds=null,loopEndSeconds=null;
 let paused=false,running=false,seeking=false,scrubbing=false;
 let renderSerial=0;
-const streamNames=['FM1','FM2','FM3','FM4','FM5','FM6','DAC'];
-const streamMuted=Array(7).fill(false);
+const streamNames=['FM1','FM2','FM3','FM4','FM5','FM6','DAC','PSG1','PSG2','PSG3'];
+const streamMuted=Array(10).fill(false);
 
 function log(s){logEl.textContent+=(logEl.textContent?'\n':'')+s;logEl.scrollTop=logEl.scrollHeight;}
 function fmtTime(sec){sec=Math.max(0,sec||0);const m=Math.floor(sec/60),s=Math.floor(sec%60);return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');}
@@ -69,13 +69,13 @@ async function sendPcm(out,startSeconds,initialSeconds=startSeconds){
   const relativeLoopEnd=hasLoop&&loopEndSeconds!==null?Math.max(0,(loopEndSeconds-startSeconds)*sourceRate):0;
   const initialOffsetFrames=Math.max(0,(initialSeconds-startSeconds)*sourceRate);
   node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds,initialOffsetFrames,loopEnabled,hasLoop,loopStartFrame:relativeLoopStart,loopEndFrame:relativeLoopEnd});
-  for(let stream=0;stream<7;stream++){
-    const name=stream<6?`/ym3438_fm${stream+1}.pcm`:'/ym3438_dac.pcm';
+  for(let stream=0;stream<10;stream++){
+    const name=stream<6?`/ym3438_fm${stream+1}.pcm`:stream===6?'/ym3438_dac.pcm':`/psg${stream-6}.pcm`;
     const pcmBytes=await out.readFile(name);
     const CHUNK_BYTES=64*1024;
     for(let off=0;off<pcmBytes.byteLength;off+=CHUNK_BYTES){const chunk=pcmBytes.slice(off,Math.min(off+CHUNK_BYTES,pcmBytes.byteLength));node.port.postMessage({type:'chunk',stream,buffer:chunk.buffer},[chunk.buffer]);}
   }
-  for(let stream=0;stream<7;stream++)node.port.postMessage({type:'mute',stream,muted:streamMuted[stream]});
+  for(let stream=0;stream<10;stream++)node.port.postMessage({type:'mute',stream,muted:streamMuted[stream]});
   node.port.postMessage({type:'end'});
   return true;
 }
@@ -100,7 +100,7 @@ for(const ev of ['dragleave','drop'])drop.addEventListener(ev,e=>{e.preventDefau
 drop.addEventListener('drop',e=>setFile(e.dataTransfer.files?.[0]));
 
 async function ensureEngine(){
-  if(!audioContext){audioContext=new AudioContext();await audioContext.audioWorklet.addModule('./worklet.js?v=final1');await audioContext.resume();log('OK: AudioContext='+audioContext.sampleRate+' Hz');}
+  if(!audioContext){audioContext=new AudioContext();await audioContext.audioWorklet.addModule('./worklet.js?v=psg1');await audioContext.resume();log('OK: AudioContext='+audioContext.sampleRate+' Hz');}
   if(!wasmerReady){await init();wasmerReady=true;log('OK: Wasmer SDK初期化');}
   if(!wasmModule){const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'});if(!r.ok)throw new Error('WASM HTTP '+r.status);const bytes=new Uint8Array(await r.arrayBuffer());log('OK: WASM '+bytes.byteLength+' bytes');wasmModule=await WebAssembly.compile(bytes);log('OK: WASMコンパイル');}
 }
@@ -138,7 +138,7 @@ async function main(){
     log('[2] VGM/VGZ → YM3438 → PCM');const result=await renderFromPosition(0);
     if(serial!==renderSerial)return;if(result.code!==0)throw new Error('YM3438 VGM/VGZ test exit code '+result.code);
     const stdout=result.stdout??result.stdoutUtf8??'';log('exit code: '+result.code);log(stdout);parseMetadata(stdout);
-    newNode();log('[6] 7系統PCMをAudioWorkletへ転送');await sendPcm(result.out,0);log('PCM streams: FM1-FM6 + DAC / source rate: '+sourceRate+' Hz');
+    newNode();log('[6] 7系統PCMをAudioWorkletへ転送');await sendPcm(result.out,0);log('PCM streams: FM1-FM6 + DAC + PSG1-PSG3 / source rate: '+sourceRate+' Hz');
     await audioContext.resume();pauseBtn.disabled=false;seekEl.disabled=loopEnabled;updateTime(0);updateChannelUI();log('[7] PCM再生開始');
   }catch(e){log('\nERROR: '+(e?.stack||e));stop();}
 }
@@ -157,7 +157,7 @@ async function doSeek(seconds){
     if(node){node.port.postMessage({type:'stop'});node.disconnect();node=null;}log('[S2] 現在のPCMを停止');
     const result=await renderFromPosition(target);if(serial!==renderSerial)return;
     const stdout=result.stdout??result.stdoutUtf8??'';log('exit code: '+result.code);log(stdout);if(result.code!==0)throw new Error('シーク用YM3438実行失敗: exit code '+result.code);
-    parseMetadata(stdout,true);newNode();await sendPcm(result.out,target,target);log('[S4] シーク後7系統PCM転送完了');updateChannelUI();updateTime(target);
+    parseMetadata(stdout,true);newNode();await sendPcm(result.out,target,target);log('[S4] シーク後10系統PCM転送完了');updateChannelUI();updateTime(target);
     if(resume){await audioContext.resume();log('[S5] シーク後の再生を開始');}else{node.port.postMessage({type:'pause'});log('[S5] シーク完了（停止中）');}
   }catch(e){log('\n[S-ERROR] '+(e?.stack||e));}
   finally{seeking=false;playBtn.disabled=true;stopBtn.disabled=false;pauseBtn.disabled=false;updateLoopUI();}
