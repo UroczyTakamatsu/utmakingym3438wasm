@@ -95,31 +95,15 @@ function newNode(){
 }
 async function sendPcm(out, keepPaused=false, startSeconds=0){
   const pcmBytes=await out.readFile('/ym3438_output.pcm');
-
-  node.port.postMessage({
-    type:'init',
-    sampleRate:sourceRate,
-    startSeconds
-  });
-
+  node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds,loopEnabled,loopStartSeconds,loopEndSeconds});
   const CHUNK_BYTES=64*1024;
-
   for(let off=0;off<pcmBytes.byteLength;off+=CHUNK_BYTES){
     const end=Math.min(off+CHUNK_BYTES,pcmBytes.byteLength);
     const chunk=pcmBytes.slice(off,end);
-
-    node.port.postMessage(
-      {type:'chunk',buffer:chunk.buffer},
-      [chunk.buffer]
-    );
+    node.port.postMessage({type:'chunk',buffer:chunk.buffer},[chunk.buffer]);
   }
-
   node.port.postMessage({type:'end'});
-
-  if(keepPaused){
-    node.port.postMessage({type:'pause'});
-  }
-
+  if(keepPaused) node.port.postMessage({type:'pause'});
   return pcmBytes.byteLength;
 }
 function setFile(file){
@@ -146,7 +130,7 @@ async function main(){
     logEl.textContent='';
     log('[1] AudioContext / AudioWorklet準備');
     audioContext=new AudioContext();
-    await audioContext.audioWorklet.addModule('./worklet.js?v=3');
+    await audioContext.audioWorklet.addModule('./worklet.js?v=4');
     newNode();
     await audioContext.resume(); log('OK: context='+audioContext.sampleRate+' Hz');
 
@@ -176,32 +160,6 @@ async function main(){
   }catch(e){log('\nERROR: '+(e?.stack||e)); console.error(e); stop();}
 }
 async function handlePlaybackEnded(){
-  if(loopRestarting)return;
-  if(loopEnabled && loopStartSeconds!==null && selectedFile && running){
-    loopRestarting=true;
-    try{
-      log('[7] ループ終端到達 → ループ開始位置から再生を継続');
-      if(node){node.port.postMessage({type:'stop'}); node.disconnect(); node=null;}
-      const result=await renderFromPosition(loopStartSeconds,'[LOOP]');
-      const stdout=result.stdout ?? result.stdoutUtf8 ?? '';
-      log('exit code: '+result.code); log(stdout);
-      if(result.code!==0)throw new Error('ループ用YM3438実行失敗: exit code '+result.code);
-      parseMetadata(stdout);
-      newNode();
-      await sendPcm(result.out,false,loopStartSeconds);
-      currentSeconds=loopStartSeconds;
-      updateTime(loopStartSeconds);
-      log('[LOOP] ループ開始位置から再生中');
-    }catch(e){
-      log('\n[LOOP-ERROR] '+(e?.stack||e));
-      running=false; paused=false;
-      if(node){node.disconnect();node=null;}
-      playBtn.disabled=!selectedFile; pauseBtn.disabled=true; stopBtn.disabled=true;
-    }finally{
-      loopRestarting=false;
-    }
-    return;
-  }
   log('[7] PCM再生終了');
   stopBtn.disabled=true; pauseBtn.disabled=true; playBtn.disabled=false;
   seekEl.disabled=!loopEnabled; running=false; paused=false;
@@ -219,6 +177,9 @@ function parseMetadata(stdout){
   duration=durationMatch?Number(durationMatch[1]):0;
   loopStartSeconds=loopMatch?Number(loopMatch[1]):null;
   loopEndSeconds=loopEndMatch?Number(loopEndMatch[1]):null;
+  if(loopStartSeconds!==null && loopEndSeconds!==null && loopEndSeconds>loopStartSeconds){
+    duration=loopEndSeconds;
+  }
   if(channels!==2)throw new Error('このAudioWorkletテストはステレオPCMのみ対応です');
   seekEl.max=String(duration); seekEl.step='0.01'; updateTime(currentSeconds); updateSeekVisibility();
 }
@@ -229,13 +190,7 @@ async function renderFromPosition(seconds, label){
   await input.writeFile('/input.vgm',inputBytes);
   const seekMs=Math.max(0,Math.round(seconds*1000));
   log(label+' VGM再構築開始: '+(seekMs/1000).toFixed(2)+'s');
-  const instance=await runWasix(wasmModule,{
-    args:[
-      `--seek-ms=${seekMs}`,
-      `--loop=${loopEnabled ? '1' : '0'}`
-    ],
-    mount:{'/in':input,'/out':out}
-  });
+  const instance=await runWasix(wasmModule,{args:[`--seek-ms=${seekMs}`, '--loop=1'],mount:{'/in':input,'/out':out}});
   const result=await instance.wait();
   result.out=out;
   return result;
@@ -282,15 +237,23 @@ async function doSeek(seconds){
   }
 }
 function toggleLoop(){
-  loopEnabled=!loopEnabled;
+  const next=!loopEnabled;
+  if(next && (loopStartSeconds===null || loopEndSeconds===null || loopEndSeconds<=loopStartSeconds)){
+    log('[LOOP] このVGMにはループ情報がないためONにできません');
+    return;
+  }
+
+  loopEnabled=next;
   loopBtn.textContent=loopEnabled?'ループ: ON':'ループ: OFF';
   updateSeekVisibility();
-  log('[LOOP] '+(loopEnabled?'オン':'オフ'));
+  if(node) node.port.postMessage({type:'setLoop',enabled:loopEnabled});
+
   if(loopEnabled){
-    // Looping has no finite completion time, so the seek UI is hidden.
     seekEl.disabled=true;
-  }else if(duration>0){
+    log('[LOOP] オン → 現在のPCMからループ継続');
+  }else{
     seekEl.disabled=!running;
+    log('[LOOP] オフ → ループ再生中なら1回目の位置へ戻して終了');
   }
 }
 
