@@ -1,16 +1,14 @@
-# YM3438 Browser Test
+YM3438 VGM/VGZ seamless loop behavior fix.
 
-この段階では、現在成功している `ymfm-sys` の YM3438 WASM が
-ブラウザで直接ロードできるかを確認します。
+Changed files:
+- src/main.rs
+- web/index.html
+- web/worklet.js
 
-注意: 現在の `ymfm-sys` WASM は wasm32-wasip1 のWASI実行形式なので、
-直接 instantiate できない可能性があります。それ自体が今回の重要な判定結果です。
-
-## 手順
-1. GitHub Actionsを実行
-2. `ym3438-browser-test` Artifactをダウンロード
-3. 展開した `index.html` をHTTP(S)サーバー経由で開く
-4. 画面のログを確認
-5. Startを押してWeb Audioの確認音を聞く
-
-`file://` ではなくHTTP(S)で開いてください。
+Behavior:
+- VGM loop information is always rendered/prepared when a loop exists, regardless of UI loop ON/OFF.
+- Loop OFF stops at the first loop end and does not play the second loop pass.
+- Loop ON can be enabled before or during the loop without rerunning WASM.
+- While looped, the seek bar/progress reports the corresponding first-pass logical position, never accumulating loop repetitions.
+- Turning loop OFF during the loop maps playback back to the corresponding first-pass position and then stops at the loop end.
+- Seek duration excludes the repeated loop pass.
