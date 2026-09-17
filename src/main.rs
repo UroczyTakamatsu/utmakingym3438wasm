@@ -9,6 +9,7 @@ const VGM_RATE: u64 = 44_100;
 const FALLBACK_YM_CLOCK: u32 = 7_670_454;
 const OUTPUT_GAIN: i32 = 128;
 const PSG_OUTPUT_GAIN: i32 = 1;
+const PSG_LEVEL_SCALE: f64 = 1024.0;
 const PSG_CLOCK_SCALE: f64 = 1.0;
 const FM_STREAMS: usize = 7; // FM1..FM6 + DAC
 const PSG_STREAMS: usize = 3;
@@ -151,7 +152,7 @@ impl PsgChip {
                 } else {
                     -Self::level(self.volume[ch])
                 };
-                let v = (sample * 8192.0 * gain as f64).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+                let v = (sample * PSG_LEVEL_SCALE * gain as f64).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
                 // AudioWorklet expects every stream to be stereo interleaved,
                 // just like the YM3438 streams. PSG itself is mono, so duplicate
                 // each channel sample to L/R. This also keeps one PSG sample =
@@ -173,7 +174,7 @@ fn make_chip(clock: u32, stream: usize) -> Result<StreamChip, String> {
     // channels are muted by clearing their L/R panning bits below.
     for ch in 0..6u32 {
         let reg = 0xb4 + ch;
-        let value = if stream < 6 && ch as usize == stream { 0xc0 } else if stream == 6 && ch == 5 { 0xc0 } else { 0x00 };
+        let value = if stream < 6 && ch as usize == stream { 0xc0 } else { 0x00 };
         let port = if ch >= 3 { 2 } else { 0 };
         chip.pin_mut().write(port, (reg - if ch >= 3 { 3 } else { 0 }) as u8);
         chip.pin_mut().write(port + 1, value);
@@ -192,7 +193,7 @@ fn apply_ym_write(sc: &mut StreamChip, stream: usize, cmd: u8, reg: u8, val: u8)
     // for the selected stream and mute the other FM channels.
     if (0xb4..=0xb6).contains(&reg) {
         let ch = if cmd == 0x52 { (reg - 0xb4) as usize } else { (reg - 0xb4 + 3) as usize };
-        let selected = if stream < 6 { ch == stream } else { ch == 5 };
+        let selected = stream < 6 && ch == stream;
         value = if selected { val | 0x00 } else { val & 0x3f };
         // For a selected stream preserve the original pan bits. For safety,
         // if neither side is selected, enable both so a channel remains audible.
@@ -238,7 +239,7 @@ fn run() -> Result<(), String> {
     let eof_rel=u32le(&bytes,0x04); let eof=if eof_rel==0 {bytes.len()} else {(0x04+eof_rel as usize).min(bytes.len())};
     let clock_raw=u32le(&bytes,0x2c); let clock=if clock_raw&0x3fff_ffff!=0 {clock_raw&0x3fff_ffff} else {FALLBACK_YM_CLOCK};
     let psg_clock_raw=u32le(&bytes,0x0c); let psg_clock=if psg_clock_raw&0x3fff_ffff!=0 {psg_clock_raw&0x3fff_ffff} else {FALLBACK_PSG_CLOCK};
-    println!("vgm_version=0x{version:08X}"); println!("vgm_data_offset=0x{data_off:X}"); println!("ym2612_clock={clock}"); println!("sn76489_clock={psg_clock}");
+    println!("vgm_version=0x{version:08X}"); println!("vgm_data_offset=0x{data_off:X}"); println!("ym2612_clock={clock}"); println!("sn76489_clock={psg_clock}"); println!("psg_level_scale={PSG_LEVEL_SCALE}");
     if data_off>=eof {return Err("invalid VGM data offset".into());}
     let probe=ffi::create_chip(ffi::ChipType::Ym3438,clock); let channels=probe.channels() as usize; let rate=probe.sample_rate() as u32;
     println!("ym3438_channels={channels}"); println!("ym3438_native_rate={rate}"); println!("psg_output_gain={PSG_OUTPUT_GAIN}"); println!("psg_clock_scale={PSG_CLOCK_SCALE}");
