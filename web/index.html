@@ -44,8 +44,10 @@ let sourceRate=44100,channels=2,duration=0,currentSeconds=0;
 let loopEnabled=true,hasLoop=false,loopStartSeconds=null,loopEndSeconds=null;
 let paused=false,running=false,seeking=false,scrubbing=false;
 let renderSerial=0;
-const streamNames=['FM1','FM2','FM3','FM4','FM5','FM6','DAC','PSG1','PSG2','PSG3'];
+const streamNames=['FM1','FM2','FM3','FM4','FM5','FM6','PSG1','PSG2','PSG3'];
+const channelStreams=[0,1,2,3,4,5,7,8,9];
 const streamMuted=Array(10).fill(false);
+streamMuted[6]=true;
 
 function log(s){logEl.textContent+=(logEl.textContent?'\n':'')+s;logEl.scrollTop=logEl.scrollHeight;}
 function fmtTime(sec){sec=Math.max(0,sec||0);const m=Math.floor(sec/60),s=Math.floor(sec%60);return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');}
@@ -82,10 +84,10 @@ async function sendPcm(out,startSeconds,initialSeconds=startSeconds){
 
 function buildChannelButtons(){
   channelButtons.textContent='';
-  streamNames.forEach((name,i)=>{const b=document.createElement('button');b.textContent=name+': '+(streamMuted[i]?'OFF':'ON');b.disabled=!running;b.onclick=()=>{streamMuted[i]=!streamMuted[i];b.textContent=name+': '+(streamMuted[i]?'OFF':'ON');if(node)node.port.postMessage({type:'mute',stream:i,muted:streamMuted[i]});log('[CH] '+name+' '+(streamMuted[i]?'OFF':'ON'));};channelButtons.appendChild(b);});
+  streamNames.forEach((name,i)=>{const stream=channelStreams[i];const b=document.createElement('button');b.textContent=name+': '+(streamMuted[stream]?'OFF':'ON');b.disabled=!running;b.onclick=()=>{streamMuted[stream]=!streamMuted[stream];b.textContent=name+': '+(streamMuted[stream]?'OFF':'ON');if(node)node.port.postMessage({type:'mute',stream,muted:streamMuted[stream]});log('[CH] '+name+' '+(streamMuted[stream]?'OFF':'ON'));};channelButtons.appendChild(b);});
 }
 
-function updateChannelUI(){for(const [i,b] of [...channelButtons.children].entries()){b.disabled=!running;b.textContent=streamNames[i]+': '+(streamMuted[i]?'OFF':'ON');}}
+function updateChannelUI(){for(const [i,b] of [...channelButtons.children].entries()){b.disabled=!running;b.textContent=streamNames[i]+': '+(streamMuted[channelStreams[i]]?'OFF':'ON');}}
 
 function setFile(file){
   if(!file)return;
@@ -100,7 +102,7 @@ for(const ev of ['dragleave','drop'])drop.addEventListener(ev,e=>{e.preventDefau
 drop.addEventListener('drop',e=>setFile(e.dataTransfer.files?.[0]));
 
 async function ensureEngine(){
-  if(!audioContext){audioContext=new AudioContext();await audioContext.audioWorklet.addModule('./worklet.js?v=psg1');await audioContext.resume();log('OK: AudioContext='+audioContext.sampleRate+' Hz');}
+  if(!audioContext){audioContext=new AudioContext();await audioContext.audioWorklet.addModule('./worklet.js?v=psg2');await audioContext.resume();log('OK: AudioContext='+audioContext.sampleRate+' Hz');}
   if(!wasmerReady){await init();wasmerReady=true;log('OK: Wasmer SDK初期化');}
   if(!wasmModule){const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'});if(!r.ok)throw new Error('WASM HTTP '+r.status);const bytes=new Uint8Array(await r.arrayBuffer());log('OK: WASM '+bytes.byteLength+' bytes');wasmModule=await WebAssembly.compile(bytes);log('OK: WASMコンパイル');}
 }
@@ -138,7 +140,7 @@ async function main(){
     log('[2] VGM/VGZ → YM3438 → PCM');const result=await renderFromPosition(0);
     if(serial!==renderSerial)return;if(result.code!==0)throw new Error('YM3438 VGM/VGZ test exit code '+result.code);
     const stdout=result.stdout??result.stdoutUtf8??'';log('exit code: '+result.code);log(stdout);parseMetadata(stdout);
-    newNode();log('[6] 7系統PCMをAudioWorkletへ転送');await sendPcm(result.out,0);log('PCM streams: FM1-FM6 + DAC + PSG1-PSG3 / source rate: '+sourceRate+' Hz');
+    newNode();log('[6] 10系統PCMをAudioWorkletへ転送');await sendPcm(result.out,0);log('PCM streams: FM1-FM6 + DAC(hidden) + PSG1-PSG3 / source rate: '+sourceRate+' Hz');
     await audioContext.resume();pauseBtn.disabled=false;seekEl.disabled=loopEnabled;updateTime(0);updateChannelUI();log('[7] PCM再生開始');
   }catch(e){log('\nERROR: '+(e?.stack||e));stop();}
 }
