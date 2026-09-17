@@ -146,7 +146,7 @@ fn run() -> Result<(), String> {
     while !ended {
         if pos>=eof {
             if let Some(lp)=loop_pos {
-                if loop_enabled && !looped_once && lp < eof { pos=lp; looped_once=true; continue; }
+                if !looped_once && lp < eof { pos=lp; looped_once=true; continue; }
             }
             break;
         }
@@ -163,15 +163,11 @@ fn run() -> Result<(), String> {
             0x80..=0x8f => {let bank=blocks.get(&0).ok_or("DAC bank missing")?; if dac_pos>=bank.len() {return Err("DAC bank exhausted".into());} let v=bank[dac_pos]; dac_pos+=1; chip.pin_mut().write(0,0x2a); chip.pin_mut().write(1,v); writes+=1; dac_writes+=1; let n=(cmd&0x0f) as u64; render_wait(&mut chip,&mut out,channels,rate,n,&mut timing,&mut peak,&mut skip_frames); waits+=n; timeline_samples+=n; pos+=1;}
             0xe0 => {let off=u32le(&bytes,pos+1) as usize; let bank=blocks.get(&0).ok_or("DAC bank missing")?; if off>=bank.len() {return Err("DAC seek out of range".into());} dac_pos=off; pos+=5;}
             0x66 => {
-                if loop_enabled {
-                    if let Some(lp)=loop_pos {
-                        if !looped_once && lp < eof {
-                            loop_end_samples = Some(timeline_samples);
-                            println!("vgm_end_reached=true; preparing seamless loop from 0x{lp:X}");
-                            pos=lp;
-                            looped_once=true;
-                            continue;
-                        }
+                if let Some(lp)=loop_pos {
+                    if !looped_once && lp < eof {
+                        loop_end_samples = Some(timeline_samples);
+                        println!("vgm_end_reached=true; preparing seamless loop from 0x{lp:X}");
+                        pos=lp; looped_once=true; continue;
                     }
                 }
                 ended=true;
@@ -185,8 +181,9 @@ fn run() -> Result<(), String> {
     let loop_end_seconds = loop_end_samples.map(|v| v as f64 / VGM_RATE as f64);
     println!("duration_seconds={:.3}", timeline_duration);
     println!("timeline_duration_seconds={:.6}", timeline_duration);
-    println!("loop_start_seconds={}", loop_start_seconds.map(|v| format!("{v:.6}")).unwrap_or_else(|| "none".into())); println!("generated_frames={frames}");
+    println!("loop_start_seconds={}", loop_start_seconds.map(|v| format!("{v:.6}")).unwrap_or_else(|| "none".into()));
     println!("loop_end_seconds={}", loop_end_seconds.map(|v| format!("{v:.6}")).unwrap_or_else(|| "none".into()));
+    println!("generated_frames={frames}");
     println!("skipped_native_frames={}", target_frames.saturating_sub(skip_frames));
     println!("seek_effective_seconds={:.6}", target_frames as f64 / rate as f64); println!("peak_raw={peak}"); println!("output_gain={OUTPUT_GAIN}"); println!("looped_once={looped_once}"); println!("timing_remainder_1_44100={}", timing.remainder);
     let preview: Vec<String> = out.iter().take(32).map(|v| v.to_string()).collect();
