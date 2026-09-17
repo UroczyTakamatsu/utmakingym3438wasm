@@ -12,8 +12,9 @@ body{font-family:sans-serif;max-width:800px;margin:24px auto;padding:0 16px;back
 button{font-size:17px;padding:10px 16px;margin:12px 4px 4px 0}button:disabled{opacity:.5}
 #file{display:none}
 #seekRow{display:block;margin:16px 0 8px;padding:12px 14px;border:1px solid #ccc;border-radius:10px;background:#fff}
-#seekLabel{display:block;font-weight:600;margin-bottom:6px}#seek{display:block;width:100%;height:28px}
+#seekRow.hidden{display:none}#seekLabel{display:block;font-weight:600;margin-bottom:6px}#seek{display:block;width:100%;height:28px}
 #time{font-variant-numeric:tabular-nums;text-align:center;color:#555;margin-top:4px}
+#channels{margin:14px 0;padding:12px 14px;border:1px solid #ccc;border-radius:10px;background:#fff}#channels strong{display:block;margin-bottom:8px}#channelButtons{display:flex;flex-wrap:wrap;gap:6px}#channelButtons button{margin:0;font-size:15px;padding:7px 10px}
 pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:100px}.ok{color:#080}.ng{color:#b00}
 </style>
 </head>
@@ -26,9 +27,7 @@ pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:1
 <div>
 <button id="play" disabled>選択した曲を再生</button><button id="pause" disabled>一時停止</button><button id="stop" disabled>停止</button><button id="loop" disabled>ループ: なし</button>
 </div>
-<div id="channels" style="margin:14px 0;padding:12px 14px;border:1px solid #ccc;border-radius:10px;background:#fff">
-<strong>チャンネルミュート</strong><div id="channelButtons" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
-</div>
+<div id="channels"><strong>チャンネル</strong><div id="channelButtons"></div></div>
 <div id="seekRow">
 <span id="seekLabel">再生位置</span><input id="seek" type="range" min="0" max="0" value="0" step="0.01" disabled aria-label="再生位置"><div id="time">00:00 / 00:00</div>
 </div>
@@ -42,16 +41,16 @@ const seekEl=document.querySelector('#seek'),timeEl=document.querySelector('#tim
 
 let selectedFile=null,audioContext=null,node=null,wasmModule=null,wasmerReady=false;
 let sourceRate=44100,channels=2,duration=0,currentSeconds=0;
-let channelEnabled=[true,true,true,true,true,true,true];
 let loopEnabled=true,hasLoop=false,loopStartSeconds=null,loopEndSeconds=null;
 let paused=false,running=false,seeking=false,scrubbing=false;
 let renderSerial=0;
+const streamNames=['FM1','FM2','FM3','FM4','FM5','FM6','DAC'];
+const streamMuted=Array(7).fill(false);
 
 function log(s){logEl.textContent+=(logEl.textContent?'\n':'')+s;logEl.scrollTop=logEl.scrollHeight;}
 function fmtTime(sec){sec=Math.max(0,sec||0);const m=Math.floor(sec/60),s=Math.floor(sec%60);return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');}
 function updateTime(sec){currentSeconds=Math.max(0,Math.min(duration,Number(sec)||0));if(!scrubbing)seekEl.value=String(currentSeconds);timeEl.textContent=fmtTime(currentSeconds)+' / '+fmtTime(duration);}
-function updateChannelUI(){channelButtons.innerHTML='';const names=['FM1','FM2','FM3','FM4','FM5','FM6','DAC'];names.forEach((name,i)=>{const b=document.createElement('button');b.textContent=name+': '+(channelEnabled[i]?'ON':'OFF');b.disabled=!running;b.style.margin='0';b.onclick=()=>{channelEnabled[i]=!channelEnabled[i];updateChannelUI();if(node)node.port.postMessage({type:'setChannels',enabled:channelEnabled});log('[CH] '+name+' '+(channelEnabled[i]?'ON':'OFF'));};channelButtons.appendChild(b);});}
-function updateLoopUI(){loopBtn.disabled=!hasLoop;loopBtn.textContent=hasLoop?(loopEnabled?'ループ: ON':'ループ: OFF'):'ループ: なし';seekEl.disabled=loopEnabled||!running||!duration;}
+function updateLoopUI(){loopBtn.disabled=!hasLoop;loopBtn.textContent=hasLoop?(loopEnabled?'ループ: ON':'ループ: OFF'):'ループ: なし';seekEl.disabled=loopEnabled||!running||!duration;document.querySelector('#seekRow').classList.toggle('hidden',loopEnabled);}
 
 function newNode(){
   if(node){node.disconnect();node=null;}
@@ -65,19 +64,28 @@ function newNode(){
   };
 }
 
-async function sendPcm(out,startSeconds){
-  const pcmBytes=await out.readFile('/ym3438_output.pcm');
+async function sendPcm(out,startSeconds,initialSeconds=startSeconds){
   const relativeLoopStart=hasLoop&&loopStartSeconds!==null?Math.max(0,(loopStartSeconds-startSeconds)*sourceRate):0;
   const relativeLoopEnd=hasLoop&&loopEndSeconds!==null?Math.max(0,(loopEndSeconds-startSeconds)*sourceRate):0;
-  node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds,loopEnabled,hasLoop,loopStartFrame:relativeLoopStart,loopEndFrame:relativeLoopEnd,sourceChannels:14,channelEnabled});
-  const CHUNK_BYTES=64*1024;
-  for(let off=0;off<pcmBytes.byteLength;off+=CHUNK_BYTES){
-    const chunk=pcmBytes.slice(off,Math.min(off+CHUNK_BYTES,pcmBytes.byteLength));
-    node.port.postMessage({type:'chunk',buffer:chunk.buffer},[chunk.buffer]);
+  const initialOffsetFrames=Math.max(0,(initialSeconds-startSeconds)*sourceRate);
+  node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds,initialOffsetFrames,loopEnabled,hasLoop,loopStartFrame:relativeLoopStart,loopEndFrame:relativeLoopEnd});
+  for(let stream=0;stream<7;stream++){
+    const name=stream<6?`/ym3438_fm${stream+1}.pcm`:'/ym3438_dac.pcm';
+    const pcmBytes=await out.readFile(name);
+    const CHUNK_BYTES=64*1024;
+    for(let off=0;off<pcmBytes.byteLength;off+=CHUNK_BYTES){const chunk=pcmBytes.slice(off,Math.min(off+CHUNK_BYTES,pcmBytes.byteLength));node.port.postMessage({type:'chunk',stream,buffer:chunk.buffer},[chunk.buffer]);}
   }
+  for(let stream=0;stream<7;stream++)node.port.postMessage({type:'mute',stream,muted:streamMuted[stream]});
   node.port.postMessage({type:'end'});
-  return pcmBytes.byteLength;
+  return true;
 }
+
+function buildChannelButtons(){
+  channelButtons.textContent='';
+  streamNames.forEach((name,i)=>{const b=document.createElement('button');b.textContent=name+': '+(streamMuted[i]?'OFF':'ON');b.disabled=!running;b.onclick=()=>{streamMuted[i]=!streamMuted[i];b.textContent=name+': '+(streamMuted[i]?'OFF':'ON');if(node)node.port.postMessage({type:'mute',stream:i,muted:streamMuted[i]});log('[CH] '+name+' '+(streamMuted[i]?'OFF':'ON'));};channelButtons.appendChild(b);});
+}
+
+function updateChannelUI(){for(const [i,b] of [...channelButtons.children].entries()){b.disabled=!running;b.textContent=streamNames[i]+': '+(streamMuted[i]?'OFF':'ON');}}
 
 function setFile(file){
   if(!file)return;
@@ -92,7 +100,7 @@ for(const ev of ['dragleave','drop'])drop.addEventListener(ev,e=>{e.preventDefau
 drop.addEventListener('drop',e=>setFile(e.dataTransfer.files?.[0]));
 
 async function ensureEngine(){
-  if(!audioContext){audioContext=new AudioContext();await audioContext.audioWorklet.addModule('./worklet.js?v=step31');await audioContext.resume();log('OK: AudioContext='+audioContext.sampleRate+' Hz');}
+  if(!audioContext){audioContext=new AudioContext();await audioContext.audioWorklet.addModule('./worklet.js?v=final1');await audioContext.resume();log('OK: AudioContext='+audioContext.sampleRate+' Hz');}
   if(!wasmerReady){await init();wasmerReady=true;log('OK: Wasmer SDK初期化');}
   if(!wasmModule){const r=await fetch('./ym3438_browser_test.wasm',{cache:'no-store'});if(!r.ok)throw new Error('WASM HTTP '+r.status);const bytes=new Uint8Array(await r.arrayBuffer());log('OK: WASM '+bytes.byteLength+' bytes');wasmModule=await WebAssembly.compile(bytes);log('OK: WASMコンパイル');}
 }
@@ -106,30 +114,31 @@ async function renderFromPosition(seconds){
   const result=await instance.wait();result.out=out;return result;
 }
 
-function parseMetadata(stdout){
+function parseMetadata(stdout,preserveLoopState=false){
   const rate=stdout.match(/pcm_sample_rate=(\d+)/),ch=stdout.match(/pcm_channels=(\d+)/);
   const dur=stdout.match(/timeline_duration_seconds=([0-9.]+)/)||stdout.match(/duration_seconds=([0-9.]+)/);
   const ls=stdout.match(/loop_start_seconds=([0-9.]+)/),le=stdout.match(/loop_end_seconds=([0-9.]+)/);
-  sourceRate=rate?Number(rate[1]):44100;channels=ch?Number(ch[1]):14;duration=dur?Number(dur[1]):0;
+  const previousLoopEnabled=loopEnabled;
+  sourceRate=rate?Number(rate[1]):44100;channels=ch?Number(ch[1]):2;duration=dur?Number(dur[1]):0;
   loopStartSeconds=ls?Number(ls[1]):null;loopEndSeconds=le?Number(le[1]):null;
   hasLoop=loopStartSeconds!==null&&loopEndSeconds!==null&&loopEndSeconds>loopStartSeconds;
   if(hasLoop)duration=loopEndSeconds;
-  loopEnabled=hasLoop;
-  if(channels!==14)throw new Error('チャンネル分離PCMが生成されませんでした');
+  loopEnabled=preserveLoopState ? (previousLoopEnabled&&hasLoop) : hasLoop;
+  if(channels!==2)throw new Error('このAudioWorkletプレイヤーはステレオPCMのみ対応です');
   seekEl.max=String(duration);seekEl.value=String(Math.min(currentSeconds,duration));updateTime(currentSeconds);updateLoopUI();
   log('[META] duration='+duration.toFixed(3)+'s, loop='+(hasLoop?loopStartSeconds.toFixed(3)+'s → '+loopEndSeconds.toFixed(3)+'s':'なし'));
 }
 
 async function main(){
   if(!selectedFile||running||seeking)return;
-  running=true;paused=false;channelEnabled=[true,true,true,true,true,true,true];updateChannelUI();playBtn.disabled=true;stopBtn.disabled=false;pauseBtn.disabled=true;
+  running=true;paused=false;playBtn.disabled=true;stopBtn.disabled=false;pauseBtn.disabled=true;
   const serial=++renderSerial;
   try{
     logEl.textContent='';log('[1] 再生エンジン準備');await ensureEngine();
     log('[2] VGM/VGZ → YM3438 → PCM');const result=await renderFromPosition(0);
     if(serial!==renderSerial)return;if(result.code!==0)throw new Error('YM3438 VGM/VGZ test exit code '+result.code);
     const stdout=result.stdout??result.stdoutUtf8??'';log('exit code: '+result.code);log(stdout);parseMetadata(stdout);
-    newNode();log('[6] PCMをAudioWorkletへ転送');const pcmBytes=await sendPcm(result.out,0);log('PCM bytes: '+pcmBytes+' / source rate: '+sourceRate+' Hz');
+    newNode();log('[6] 7系統PCMをAudioWorkletへ転送');await sendPcm(result.out,0);log('PCM streams: FM1-FM6 + DAC / source rate: '+sourceRate+' Hz');
     await audioContext.resume();pauseBtn.disabled=false;seekEl.disabled=loopEnabled;updateTime(0);updateChannelUI();log('[7] PCM再生開始');
   }catch(e){log('\nERROR: '+(e?.stack||e));stop();}
 }
@@ -148,23 +157,63 @@ async function doSeek(seconds){
     if(node){node.port.postMessage({type:'stop'});node.disconnect();node=null;}log('[S2] 現在のPCMを停止');
     const result=await renderFromPosition(target);if(serial!==renderSerial)return;
     const stdout=result.stdout??result.stdoutUtf8??'';log('exit code: '+result.code);log(stdout);if(result.code!==0)throw new Error('シーク用YM3438実行失敗: exit code '+result.code);
-    parseMetadata(stdout);newNode();const pcmBytes=await sendPcm(result.out,target);log('[S4] シーク後PCM転送: '+pcmBytes+' bytes');updateTime(target);
+    parseMetadata(stdout,true);newNode();await sendPcm(result.out,target,target);log('[S4] シーク後7系統PCM転送完了');updateChannelUI();updateTime(target);
     if(resume){await audioContext.resume();log('[S5] シーク後の再生を開始');}else{node.port.postMessage({type:'pause'});log('[S5] シーク完了（停止中）');}
   }catch(e){log('\n[S-ERROR] '+(e?.stack||e));}
-  finally{seeking=false;playBtn.disabled=true;stopBtn.disabled=false;pauseBtn.disabled=false;updateLoopUI();updateChannelUI();}
+  finally{seeking=false;playBtn.disabled=true;stopBtn.disabled=false;pauseBtn.disabled=false;updateLoopUI();}
 }
 
-function toggleLoop(){
-  if(!hasLoop)return;loopEnabled=!loopEnabled;loopBtn.textContent=loopEnabled?'ループ: ON':'ループ: OFF';updateLoopUI();if(node)node.port.postMessage({type:'setLoop',enabled:loopEnabled});log('[LOOP] '+(loopEnabled?'ON':'OFF'));
+async function toggleLoop(){
+  if(!hasLoop||seeking)return;
+  const next=!loopEnabled;
+  if(!next){
+    loopEnabled=false;
+    if(node)node.port.postMessage({type:'setLoop',enabled:false});
+    updateLoopUI();
+    log('[LOOP] OFF');
+    return;
+  }
+  if(!running||!selectedFile||!wasmModule||!audioContext)return;
+  const target=currentSeconds;
+  const bufferStart=loopStartSeconds!==null&&target>=loopStartSeconds?loopStartSeconds:target;
+  const serial=++renderSerial;
+  seeking=true;
+  loopEnabled=true;
+  loopBtn.disabled=true;
+  pauseBtn.disabled=true;
+  stopBtn.disabled=true;
+  log('[LOOP] ON: ループ開始点を '+(loopStartSeconds||0).toFixed(3)+'s に固定');
+  try{
+    if(node){node.port.postMessage({type:'stop'});node.disconnect();node=null;}
+    const result=await renderFromPosition(bufferStart);
+    if(serial!==renderSerial)return;
+    const stdout=result.stdout??result.stdoutUtf8??'';
+    log('exit code: '+result.code);log(stdout);
+    if(result.code!==0)throw new Error('ループ用YM3438実行失敗: exit code '+result.code);
+    parseMetadata(stdout,true);
+    newNode();
+    await sendPcm(result.out,bufferStart,target);
+    log('[LOOP] 7系統PCM再構築完了');updateChannelUI();
+    await audioContext.resume();
+  }catch(e){
+    loopEnabled=false;
+    log('\n[LOOP-ERROR] '+(e?.stack||e));
+  }finally{
+    seeking=false;
+    pauseBtn.disabled=false;
+    stopBtn.disabled=false;
+    updateLoopUI();
+  }
 }
 function togglePause(){if(!node||!running||seeking)return;if(paused){node.port.postMessage({type:'resume'});paused=false;pauseBtn.textContent='一時停止';log('[9] 再生再開');}else{node.port.postMessage({type:'pause'});paused=true;pauseBtn.textContent='再生';log('[8] 一時停止');}}
 function stop(){++renderSerial;if(node){node.port.postMessage({type:'stop'});node.disconnect();node=null;}if(audioContext){audioContext.close();audioContext=null;}running=false;paused=false;seeking=false;playBtn.disabled=!selectedFile;pauseBtn.disabled=true;stopBtn.disabled=true;pauseBtn.textContent='一時停止';updateLoopUI();updateChannelUI();}
 
+buildChannelButtons();
 playBtn.onclick=main;pauseBtn.onclick=togglePause;stopBtn.onclick=()=>{log('\n[11] 停止');stop();};loopBtn.onclick=toggleLoop;
 seekEl.addEventListener('pointerdown',()=>{if(!loopEnabled&&running)scrubbing=true;});
 seekEl.addEventListener('touchstart',()=>{if(!loopEnabled&&running)scrubbing=true;},{passive:true});
 seekEl.addEventListener('input',()=>{if(!loopEnabled&&running){scrubbing=true;updateTime(Number(seekEl.value));}});
 seekEl.addEventListener('change',()=>doSeek(Number(seekEl.value)));seekEl.addEventListener('pointercancel',()=>scrubbing=false);
-updateLoopUI();updateChannelUI();
+updateLoopUI();
 </script>
 </body></html>
