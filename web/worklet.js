@@ -17,7 +17,7 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
         const stream=Number(m.stream);if(stream<0||stream>=this.streams)return;
         const data=new Int16Array(m.buffer);const start=this.chunks[stream].reduce((n,c)=>n+Math.floor(c.data.length/2),0);this.chunks[stream].push({data,startFrame:start});
         if(stream===this.streams-1)this.totalFrames=start+Math.floor(data.length/2);
-      }else if(m.type==='end'){this.ready=true;this.ended=true;}
+      }else if(m.type==='end'){this.totalFrames=this.chunks.reduce((max,cs)=>Math.max(max,cs.length?cs[cs.length-1].startFrame+Math.floor(cs[cs.length-1].data.length/2):0),0);if(this.hasLoop){this.loopStartFrame=Math.min(this.loopStartFrame,this.totalFrames);this.loopEndFrame=Math.min(this.loopEndFrame,this.totalFrames);}this.ready=true;this.ended=true;}
       else if(m.type==='pause'){this.paused=true;}
       else if(m.type==='resume'){this.paused=false;}
       else if(m.type==='setLoop'){this.loopEnabled=!!m.enabled;this.endNotified=false;}
