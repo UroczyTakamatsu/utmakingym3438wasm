@@ -12,7 +12,7 @@ body{font-family:sans-serif;max-width:800px;margin:24px auto;padding:0 16px;back
 button{font-size:17px;padding:10px 16px;margin:12px 4px 4px 0}button:disabled{opacity:.5}
 #file{display:none}
 #seekRow{display:block;margin:16px 0 8px;padding:12px 14px;border:1px solid #ccc;border-radius:10px;background:#fff}
-#seekLabel{display:block;font-weight:600;margin-bottom:6px}#seek{display:block;width:100%;height:28px}
+#seekRow.hidden{display:none}#seekLabel{display:block;font-weight:600;margin-bottom:6px}#seek{display:block;width:100%;height:28px}
 #time{font-variant-numeric:tabular-nums;text-align:center;color:#555;margin-top:4px}
 pre{background:#eee;padding:14px;white-space:pre-wrap;overflow:auto;min-height:100px}.ok{color:#080}.ng{color:#b00}
 </style>
@@ -46,7 +46,7 @@ let renderSerial=0;
 function log(s){logEl.textContent+=(logEl.textContent?'\n':'')+s;logEl.scrollTop=logEl.scrollHeight;}
 function fmtTime(sec){sec=Math.max(0,sec||0);const m=Math.floor(sec/60),s=Math.floor(sec%60);return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');}
 function updateTime(sec){currentSeconds=Math.max(0,Math.min(duration,Number(sec)||0));if(!scrubbing)seekEl.value=String(currentSeconds);timeEl.textContent=fmtTime(currentSeconds)+' / '+fmtTime(duration);}
-function updateLoopUI(){loopBtn.disabled=!hasLoop;loopBtn.textContent=hasLoop?(loopEnabled?'ループ: ON':'ループ: OFF'):'ループ: なし';seekEl.disabled=loopEnabled||!running||!duration;}
+function updateLoopUI(){loopBtn.disabled=!hasLoop;loopBtn.textContent=hasLoop?(loopEnabled?'ループ: ON':'ループ: OFF'):'ループ: なし';seekEl.disabled=loopEnabled||!running||!duration;document.querySelector('#seekRow').classList.toggle('hidden',loopEnabled);}
 
 function newNode(){
   if(node){node.disconnect();node=null;}
@@ -60,11 +60,12 @@ function newNode(){
   };
 }
 
-async function sendPcm(out,startSeconds){
+async function sendPcm(out,startSeconds,initialSeconds=startSeconds){
   const pcmBytes=await out.readFile('/ym3438_output.pcm');
   const relativeLoopStart=hasLoop&&loopStartSeconds!==null?Math.max(0,(loopStartSeconds-startSeconds)*sourceRate):0;
   const relativeLoopEnd=hasLoop&&loopEndSeconds!==null?Math.max(0,(loopEndSeconds-startSeconds)*sourceRate):0;
-  node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds,loopEnabled,hasLoop,loopStartFrame:relativeLoopStart,loopEndFrame:relativeLoopEnd});
+  const initialOffsetFrames=Math.max(0,(initialSeconds-startSeconds)*sourceRate);
+  node.port.postMessage({type:'init',sampleRate:sourceRate,startSeconds,initialOffsetFrames,loopEnabled,hasLoop,loopStartFrame:relativeLoopStart,loopEndFrame:relativeLoopEnd});
   const CHUNK_BYTES=64*1024;
   for(let off=0;off<pcmBytes.byteLength;off+=CHUNK_BYTES){
     const chunk=pcmBytes.slice(off,Math.min(off+CHUNK_BYTES,pcmBytes.byteLength));
@@ -101,15 +102,16 @@ async function renderFromPosition(seconds){
   const result=await instance.wait();result.out=out;return result;
 }
 
-function parseMetadata(stdout){
+function parseMetadata(stdout,preserveLoopState=false){
   const rate=stdout.match(/pcm_sample_rate=(\d+)/),ch=stdout.match(/pcm_channels=(\d+)/);
   const dur=stdout.match(/timeline_duration_seconds=([0-9.]+)/)||stdout.match(/duration_seconds=([0-9.]+)/);
   const ls=stdout.match(/loop_start_seconds=([0-9.]+)/),le=stdout.match(/loop_end_seconds=([0-9.]+)/);
+  const previousLoopEnabled=loopEnabled;
   sourceRate=rate?Number(rate[1]):44100;channels=ch?Number(ch[1]):2;duration=dur?Number(dur[1]):0;
   loopStartSeconds=ls?Number(ls[1]):null;loopEndSeconds=le?Number(le[1]):null;
   hasLoop=loopStartSeconds!==null&&loopEndSeconds!==null&&loopEndSeconds>loopStartSeconds;
   if(hasLoop)duration=loopEndSeconds;
-  loopEnabled=hasLoop;
+  loopEnabled=preserveLoopState ? (previousLoopEnabled&&hasLoop) : hasLoop;
   if(channels!==2)throw new Error('このAudioWorkletプレイヤーはステレオPCMのみ対応です');
   seekEl.max=String(duration);seekEl.value=String(Math.min(currentSeconds,duration));updateTime(currentSeconds);updateLoopUI();
   log('[META] duration='+duration.toFixed(3)+'s, loop='+(hasLoop?loopStartSeconds.toFixed(3)+'s → '+loopEndSeconds.toFixed(3)+'s':'なし'));
@@ -143,14 +145,53 @@ async function doSeek(seconds){
     if(node){node.port.postMessage({type:'stop'});node.disconnect();node=null;}log('[S2] 現在のPCMを停止');
     const result=await renderFromPosition(target);if(serial!==renderSerial)return;
     const stdout=result.stdout??result.stdoutUtf8??'';log('exit code: '+result.code);log(stdout);if(result.code!==0)throw new Error('シーク用YM3438実行失敗: exit code '+result.code);
-    parseMetadata(stdout);newNode();const pcmBytes=await sendPcm(result.out,target);log('[S4] シーク後PCM転送: '+pcmBytes+' bytes');updateTime(target);
+    parseMetadata(stdout,true);newNode();const pcmBytes=await sendPcm(result.out,target,target);log('[S4] シーク後PCM転送: '+pcmBytes+' bytes');updateTime(target);
     if(resume){await audioContext.resume();log('[S5] シーク後の再生を開始');}else{node.port.postMessage({type:'pause'});log('[S5] シーク完了（停止中）');}
   }catch(e){log('\n[S-ERROR] '+(e?.stack||e));}
   finally{seeking=false;playBtn.disabled=true;stopBtn.disabled=false;pauseBtn.disabled=false;updateLoopUI();}
 }
 
-function toggleLoop(){
-  if(!hasLoop)return;loopEnabled=!loopEnabled;loopBtn.textContent=loopEnabled?'ループ: ON':'ループ: OFF';updateLoopUI();if(node)node.port.postMessage({type:'setLoop',enabled:loopEnabled});log('[LOOP] '+(loopEnabled?'ON':'OFF'));
+async function toggleLoop(){
+  if(!hasLoop||seeking)return;
+  const next=!loopEnabled;
+  if(!next){
+    loopEnabled=false;
+    if(node)node.port.postMessage({type:'setLoop',enabled:false});
+    updateLoopUI();
+    log('[LOOP] OFF');
+    return;
+  }
+  if(!running||!selectedFile||!wasmModule||!audioContext)return;
+  const target=currentSeconds;
+  const bufferStart=loopStartSeconds!==null&&target>=loopStartSeconds?loopStartSeconds:target;
+  const serial=++renderSerial;
+  seeking=true;
+  loopEnabled=true;
+  loopBtn.disabled=true;
+  pauseBtn.disabled=true;
+  stopBtn.disabled=true;
+  log('[LOOP] ON: ループ開始点を '+(loopStartSeconds||0).toFixed(3)+'s に固定');
+  try{
+    if(node){node.port.postMessage({type:'stop'});node.disconnect();node=null;}
+    const result=await renderFromPosition(bufferStart);
+    if(serial!==renderSerial)return;
+    const stdout=result.stdout??result.stdoutUtf8??'';
+    log('exit code: '+result.code);log(stdout);
+    if(result.code!==0)throw new Error('ループ用YM3438実行失敗: exit code '+result.code);
+    parseMetadata(stdout,true);
+    newNode();
+    const pcmBytes=await sendPcm(result.out,bufferStart,target);
+    log('[LOOP] PCM再構築完了: '+pcmBytes+' bytes');
+    await audioContext.resume();
+  }catch(e){
+    loopEnabled=false;
+    log('\n[LOOP-ERROR] '+(e?.stack||e));
+  }finally{
+    seeking=false;
+    pauseBtn.disabled=false;
+    stopBtn.disabled=false;
+    updateLoopUI();
+  }
 }
 function togglePause(){if(!node||!running||seeking)return;if(paused){node.port.postMessage({type:'resume'});paused=false;pauseBtn.textContent='一時停止';log('[9] 再生再開');}else{node.port.postMessage({type:'pause'});paused=true;pauseBtn.textContent='再生';log('[8] 一時停止');}}
 function stop(){++renderSerial;if(node){node.port.postMessage({type:'stop'});node.disconnect();node=null;}if(audioContext){audioContext.close();audioContext=null;}running=false;paused=false;seeking=false;playBtn.disabled=!selectedFile;pauseBtn.disabled=true;stopBtn.disabled=true;pauseBtn.textContent='一時停止';updateLoopUI();}
