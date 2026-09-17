@@ -1,123 +1,59 @@
 class PcmPlayerProcessor extends AudioWorkletProcessor {
   constructor(){
     super();
-    this.chunks=[]; this.pcm=null; this.totalFrames=0; this.ready=false;
-    this.sourcePos=0; this.sourceRate=sampleRate; this.startSeconds=0;
-    this.loopEnabled=false; this.hasLoop=false;
-    this.loopStartFrame=null; this.loopEndFrame=null;
-    this.paused=false; this.endNotified=false; this.reportCounter=0;
+    this.chunks=[];this.totalFrames=0;this.ready=false;this.sourcePos=0;this.sourceRate=sampleRate;
+    this.ended=false;this.endNotified=false;this.paused=false;this.loopEnabled=false;this.hasLoop=false;
+    this.loopStartFrame=0;this.loopEndFrame=0;this.timelineStartSeconds=0;this.reportCounter=0;
     this.port.onmessage=e=>{
       const m=e.data||{};
       if(m.type==='init'){
-        this.chunks=[]; this.pcm=null; this.totalFrames=Number(m.totalFrames)||0;
-        this.ready=false; this.sourceRate=Number(m.sampleRate)||sampleRate;
-        this.sourcePos=0; this.startSeconds=Number(m.startSeconds)||0;
-        this.loopEnabled=!!m.loopEnabled; this.hasLoop=!!m.hasLoop;
-        this.loopStartFrame=Number.isFinite(Number(m.loopStartFrame))?Number(m.loopStartFrame):null;
-        this.loopEndFrame=Number.isFinite(Number(m.loopEndFrame))?Number(m.loopEndFrame):null;
-        this.paused=false; this.endNotified=false; this.reportCounter=0;
+        this.chunks=[];this.totalFrames=0;this.ready=false;this.sourceRate=Number(m.sampleRate)||sampleRate;this.sourcePos=0;
+        this.ended=false;this.endNotified=false;this.paused=false;this.loopEnabled=!!m.loopEnabled;this.hasLoop=!!m.hasLoop;
+        this.timelineStartSeconds=Number(m.startSeconds)||0;this.loopStartFrame=Number(m.loopStartFrame)||0;this.loopEndFrame=Number(m.loopEndFrame)||0;this.reportCounter=0;
       }else if(m.type==='chunk'){
-        this.chunks.push(new Int16Array(m.buffer));
-      }else if(m.type==='end'){
-        let n=0; for(const q of this.chunks)n+=q.length;
-        this.pcm=new Int16Array(n); let p=0;
-        for(const q of this.chunks){this.pcm.set(q,p);p+=q.length;}
-        this.chunks=[]; this.totalFrames=Math.floor(this.pcm.length/2); this.ready=true;
-      }else if(m.type==='pause'){
-        this.paused=true;
-      }else if(m.type==='resume'){
-        this.paused=false;
-      }else if(m.type==='setLoop'){
-        this.loopEnabled=!!m.enabled; this.endNotified=false;
-      }else if(m.type==='stop'){
-        this.chunks=[]; this.pcm=null; this.totalFrames=0; this.ready=false;
-        this.sourcePos=0; this.endNotified=false; this.paused=false; this.reportCounter=0;
-      }
+        const data=new Int16Array(m.buffer);this.chunks.push({data,startFrame:this.totalFrames});this.totalFrames+=Math.floor(data.length/2);
+      }else if(m.type==='end'){this.ended=true;this.ready=true;}
+      else if(m.type==='pause'){this.paused=true;}
+      else if(m.type==='resume'){this.paused=false;}
+      else if(m.type==='setLoop'){this.loopEnabled=!!m.enabled;this.endNotified=false;}
+      else if(m.type==='stop'){this.reset();}
     };
   }
+  reset(){this.chunks=[];this.totalFrames=0;this.ready=false;this.sourcePos=0;this.ended=false;this.endNotified=false;this.paused=false;this.loopEnabled=false;this.hasLoop=false;this.loopStartFrame=0;this.loopEndFrame=0;this.timelineStartSeconds=0;this.reportCounter=0;}
   frameAt(i){
-    if(!this.pcm||i<0||i>=this.totalFrames)return null;
-    const p=i*2; return [this.pcm[p],this.pcm[p+1]];
+    if(i<0||i>=this.totalFrames)return null;
+    for(const c of this.chunks){if(i>=c.startFrame){const p=(i-c.startFrame)*2;if(p+1<c.data.length)return[c.data[p],c.data[p+1]];}else break;}
+    return null;
   }
-  progressSeconds(){return this.startSeconds+this.sourcePos/this.sourceRate;}
-  finish(out,i){
-    for(let j=i;j<out[0].length;j++){out[0][j]=0;if(out[1])out[1][j]=0;}
-    if(!this.endNotified){this.endNotified=true;this.port.postMessage({type:'ended'});}
+  finish(left,right,i){
+    left[i]=0;right[i]=0;if(!this.endNotified){this.endNotified=true;this.port.postMessage({type:'ended'});}
+  }
+  progressSeconds(){
+    const absolute=this.timelineStartSeconds+this.sourcePos/this.sourceRate;
+    if(this.hasLoop&&this.loopEnabled&&this.loopEndFrame>this.loopStartFrame){
+      const end=this.timelineStartSeconds+this.loopEndFrame/this.sourceRate;
+      const start=this.timelineStartSeconds+this.loopStartFrame/this.sourceRate;
+      if(absolute>=end){const len=end-start;return start+((absolute-end)%len);}
+    }
+    return absolute;
   }
   process(_inputs,outputs){
-    const out=outputs[0], left=out[0], right=out[1]||out[0];
-    if(this.paused||!this.ready){
-      left.fill(0);
-      if(out[1])right.fill(0);
-      return true;
-    }
-
+    const out=outputs[0],left=out[0],right=out[1]||out[0];
+    if(this.paused||!this.ready){left.fill(0);if(out[1])right.fill(0);return true;}
     const ratio=this.sourceRate/sampleRate;
-    let loopStart=Number.isFinite(this.loopStartFrame)?this.loopStartFrame:0;
-    let loopEnd=Number.isFinite(this.loopEndFrame)?this.loopEndFrame:this.totalFrames;
-    const hasValidLoop=this.hasLoop &&
-      loopEnd>0 &&
-      loopEnd<=this.totalFrames &&
-      loopStart>=0 &&
-      loopStart<loopEnd;
-
+    const validLoop=this.hasLoop&&this.loopEndFrame>this.loopStartFrame&&this.loopEndFrame<=this.totalFrames;
     for(let i=0;i<left.length;i++){
-      // If the current source position is already at/past the loop end,
-      // wrap before reading the next sample.
-      if(hasValidLoop && this.loopEnabled && this.sourcePos>=loopEnd){
-        const loopLength=loopEnd-loopStart;
-        this.sourcePos=loopStart + ((this.sourcePos-loopEnd)%loopLength);
-        this.endNotified=false;
-        this.port.postMessage({type:'loop',seconds:this.progressSeconds()});
+      if(validLoop&&this.loopEnabled&&this.sourcePos>=this.loopEndFrame){
+        const len=this.loopEndFrame-this.loopStartFrame;this.sourcePos=this.loopStartFrame+((this.sourcePos-this.loopEndFrame)%len);this.endNotified=false;this.port.postMessage({type:'loop'});
       }
-
-      // Loop OFF: the first pass ends at the VGM loop end.
-      if(hasValidLoop && !this.loopEnabled && this.sourcePos>=loopEnd){
-        this.finish(out,i);
-        continue;
-      }
-
-      // No loop: play until the end of the PCM.
-      if(!hasValidLoop && this.sourcePos>=this.totalFrames-1){
-        this.finish(out,i);
-        continue;
-      }
-
-      const base=Math.floor(this.sourcePos);
-      const frac=this.sourcePos-base;
-
-      // Normally interpolate base -> base+1.
-      // At the loop boundary interpolate base -> loopStart, so the
-      // boundary itself is seamless and does not read past loopEnd.
-      let next=base+1;
-      let bFrame=next;
-      if(hasValidLoop && this.loopEnabled && next>=loopEnd){
-        bFrame=loopStart;
-      }
-
-      const a=this.frameAt(base);
-      const b=this.frameAt(bFrame);
-      if(!a||!b){
-        this.finish(out,i);
-        continue;
-      }
-
-      left[i]=(a[0]+(b[0]-a[0])*frac)/32768;
-      right[i]=(a[1]+(b[1]-a[1])*frac)/32768;
-
-      const nextPos=this.sourcePos+ratio;
-
-      // If this output sample crosses the loop boundary, keep the exact
-      // fractional overshoot and wrap it into the loop on the next sample.
-      this.sourcePos=nextPos;
-
-      if(++this.reportCounter>=12){
-        this.reportCounter=0;
-        this.port.postMessage({
-          type:'progress',
-          seconds:this.progressSeconds()
-        });
-      }
+      if(validLoop&&!this.loopEnabled&&this.sourcePos>=this.loopEndFrame){this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;}
+      if(!validLoop&&this.sourcePos>=this.totalFrames-1){this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;}
+      const base=Math.floor(this.sourcePos),frac=this.sourcePos-base;
+      let next=base+1;if(validLoop&&this.loopEnabled&&next>=this.loopEndFrame)next=this.loopStartFrame;
+      const a=this.frameAt(base),b=this.frameAt(next);
+      if(!a||!b){this.finish(left,right,i);for(let j=i+1;j<left.length;j++){left[j]=0;right[j]=0;}return true;}
+      left[i]=(a[0]+(b[0]-a[0])*frac)/32768;right[i]=(a[1]+(b[1]-a[1])*frac)/32768;this.sourcePos+=ratio;
+      if(++this.reportCounter>=12){this.reportCounter=0;this.port.postMessage({type:'progress',seconds:this.progressSeconds()});}
     }
     return true;
   }
