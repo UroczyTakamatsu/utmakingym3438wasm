@@ -59,7 +59,7 @@ fn make_chip(clock: u32, stream: usize) -> Result<StreamChip, String> {
         let reg = 0xb4 + ch;
         let value = if stream < 6 && ch as usize == stream { 0xc0 } else if stream == 6 && ch == 5 { 0xc0 } else { 0x00 };
         let port = if ch >= 3 { 2 } else { 0 };
-        chip.pin_mut().write(port, reg - if ch >= 3 { 3u8 } else { 0u8 });
+        chip.pin_mut().write(port, (reg - if ch >= 3 { 3u32 } else { 0u32 }) as u8);
         chip.pin_mut().write(port + 1, value);
     }
     // FM streams must not contain DAC; DAC stream forces DAC on.
